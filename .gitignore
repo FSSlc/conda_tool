@@ -135,4 +135,4 @@ dmypy.json
 test
 output
 *.log
-
+.DS_Store

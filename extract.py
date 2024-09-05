@@ -6,16 +6,7 @@ import logging
 import os
 import shutil
 
-SCRIPT_DIR = os.path.dirname(__file__)
-
-
-def setup_logging():
-    log_path = os.path.join(SCRIPT_DIR, "extract.log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_path, mode="w"), logging.StreamHandler()],
-    )
+from utils import SCRIPT_DIR, setup_logging
 
 
 def parse_args():
@@ -50,7 +41,7 @@ def parse_args():
 
     output_dir = args.output
     if not os.path.isabs(output_dir):
-        source_path = os.path.abspath(os.path.join(SCRIPT_DIR, output_dir))
+        output_dir = os.path.abspath(os.path.join(SCRIPT_DIR, output_dir))
     args.output = output_dir
 
     # 检查源文件是否存在
@@ -71,71 +62,75 @@ def parse_args():
     return args
 
 
-def extract(args):
-    source_path = args.source
-    output_dir = args.output
+class Extractor(object):
+    def __init__(self, args):
+        self.source_path = args.source
+        self.output_dir = args.output
+        self.keep_tar = args.keep_tar
 
-    pkgs_dir = os.path.join(output_dir, "workdir/pkgs")
-    os.makedirs(pkgs_dir, exist_ok=True)
+    def run(self):
+        pkgs_dir = os.path.join(self.output_dir, "workdir/pkgs")
+        os.makedirs(pkgs_dir, exist_ok=True)
 
-    logging.info("解析 sh 文件信息")
-    old_mode = False
-    script_data, conda_exec_data, pkgs_data = None, None, None
-    offset0, offset1, offset2 = 0, 0, 0
-    with open(source_path, "rb") as fin:
-        while True:
-            line = fin.readline()
-            if b"LINES" in line:
-                old_mode = True
-            if b"boundary1=" in line:
-                offset1 = int(line.split()[-2])
-            if b"boundary2=" in line:
-                offset2 = int(line.split()[-2])
-            if b"@@END_HEADER@@" == line.strip():
-                offset0 = fin.tell()
-                fin.seek(0)
-                script_data = fin.read(offset0)
-                break
+        logging.info("解析 sh 文件信息")
+        old_mode = False
+        script_data, conda_exec_data, pkgs_data = None, None, None
+        offset0, offset1, offset2 = 0, 0, 0
+        with open(self.source_path, "rb") as fin:
+            while True:
+                line = fin.readline()
+                if b"LINES" in line:
+                    old_mode = True
+                if b"boundary1=" in line:
+                    offset1 = int(line.split()[-2])
+                if b"boundary2=" in line:
+                    offset2 = int(line.split()[-2])
+                if b"@@END_HEADER@@" == line.strip():
+                    offset0 = fin.tell()
+                    fin.seek(0)
+                    script_data = fin.read(offset0)
+                    break
 
-        if old_mode:
-            pkgs_data = fin.read()
-        else:
-            fin.seek(offset0)
-            conda_exec_data = fin.read(offset1)
-            pkgs_data = fin.read(offset2)
-    logging.info("解析 sh 文件信息完毕")
+            if old_mode:
+                pkgs_data = fin.read()
+            else:
+                fin.seek(offset0)
+                conda_exec_data = fin.read(offset1)
+                pkgs_data = fin.read(offset2)
+        logging.info("解析 sh 文件信息完毕")
 
-    logging.info("输出 sh 文件脚本内容")
-    tpl_path = os.path.join(output_dir, "tpl.sh")
-    with open(tpl_path, "wb") as fout:
-        fout.write(script_data)
-    logging.info("输出 sh 文件脚本内容完毕")
+        logging.info("输出 sh 文件脚本内容")
+        tpl_path = os.path.join(self.output_dir, "tpl.sh")
+        with open(tpl_path, "wb") as fout:
+            fout.write(script_data)
+        logging.info("输出 sh 文件脚本内容完毕")
 
-    if not old_mode:
-        logging.info("输出 sh 文件自带 conda 可执行程序")
-        conda_exec_path = os.path.join(output_dir, "_conda")
-        with open(conda_exec_path, "wb") as fout:
-            fout.write(conda_exec_data)
-        logging.info("输出 sh 文件自带 conda 可执行程序完毕")
+        if not old_mode:
+            logging.info("输出 sh 文件自带 conda 可执行程序")
+            conda_exec_path = os.path.join(self.output_dir, "_conda")
+            with open(conda_exec_path, "wb") as fout:
+                fout.write(conda_exec_data)
+            logging.info("输出 sh 文件自带 conda 可执行程序完毕")
 
-    logging.info("输出 sh 文件 conda 包")
-    pkgs_path = os.path.join(output_dir, "pkgs.tar")
-    pkgs_output_dir = os.path.join(output_dir, "workdir")
-    with open(pkgs_path, "wb") as fout:
-        fout.write(pkgs_data)
-    logging.info("输出 sh 文件 conda 压缩包完毕")
+        logging.info("输出 sh 文件 conda 包")
+        pkgs_path = os.path.join(self.output_dir, "pkgs.tar")
+        pkgs_output_dir = os.path.join(self.output_dir, "workdir")
+        with open(pkgs_path, "wb") as fout:
+            fout.write(pkgs_data)
+        logging.info("输出 sh 文件 conda 压缩包完毕")
 
-    logging.info("解压 sh 文件 conda 包完毕")
-    shutil.unpack_archive(pkgs_path, pkgs_output_dir, "tar")
-    if not args.keep_tar:
-        os.unlink(pkgs_path)
-    logging.info("解压 sh 文件 conda 压缩包完毕")
+        logging.info("解压 sh 文件 conda 包完毕")
+        shutil.unpack_archive(pkgs_path, pkgs_output_dir, "tar")
+        if not self.keep_tar:
+            os.unlink(pkgs_path)
+        logging.info("解压 sh 文件 conda 压缩包完毕")
 
 
 def main():
-    setup_logging()
+    setup_logging("extract.log")
     args = parse_args()
-    extract(args)
+    extractor = Extractor(args)
+    extractor.run()
 
 
 if __name__ == "__main__":
