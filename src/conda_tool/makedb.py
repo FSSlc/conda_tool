@@ -16,6 +16,7 @@ from .utils import SCRIPT_DIR
 
 
 def load_repodata(arches: List[str], forge_url: str) -> dict[str, Any]:
+    """获取 repodata.json 数据"""
     data = {}
     for arch in arches:
         url = os.path.join(forge_url, f"{arch}/repodata.json.bz2")
@@ -35,11 +36,13 @@ def load_repodata(arches: List[str], forge_url: str) -> dict[str, Any]:
 
 
 def parse_repodata(data: Any, out: str, forge_url: str) -> None:
+    """转换 repodata 数据"""
     print("Extracting package database ...")
     pkg_db = defaultdict(list)
     for pn, p in data.items():
         n = p["name"]
         v = p["version"]
+        deps = p.get("depends", [])
         pkg_db[n].append(
             {
                 "name": n,
@@ -47,7 +50,7 @@ def parse_repodata(data: Any, out: str, forge_url: str) -> None:
                 "nv": f"{n}-{v}",
                 "md5": p["md5"],
                 "build": p["build"],
-                "depends": p["depends"],
+                "depends": deps,
                 "timestamp": p.get("timestamp", 0),
                 "url": f"{forge_url}/{p['subdir']}/{pn}",
             }
@@ -64,7 +67,8 @@ def parse_repodata(data: Any, out: str, forge_url: str) -> None:
         json.dump(pkg_db, f, ensure_ascii=False)
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
+    """解析命令行参数"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "-o",
@@ -119,7 +123,12 @@ def main() -> None:
         help="Whether to force refresh repodata",
     )
     args = parser.parse_args()
+    return args
 
+
+def main() -> None:
+    """主要实现逻辑"""
+    args = parse_args()
     exist_data_fn = f"{SCRIPT_DIR}/data/data.json"
     if os.path.exists(exist_data_fn):
         with open(exist_data_fn, encoding="utf8") as fin:

@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+"""Mofdify a conda package according to a rule file."""
+
 import argparse
 import json
 import os
@@ -8,6 +10,7 @@ import sys
 import tarfile
 from collections import defaultdict
 from logging import getLogger
+from typing import Any, Dict, List, Tuple
 from zipfile import ZIP_STORED, ZipFile
 
 import pathspec
@@ -38,7 +41,8 @@ EXAMPLE_DATA = {
 }
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
+    """解析参数"""
     logger.info("开始解析参数")
     # 创建 ArgumentParser 对象
     parser = argparse.ArgumentParser(description="conda 包修改工具")
@@ -61,24 +65,27 @@ def parse_args():
     try:
         args = parser.parse_args()
         if args.output_example_config:
-            with open("config.json", "w") as fout:
+            with open("config.json", "w", encoding="utf-8") as fout:
                 json.dump(EXAMPLE_DATA, fout, indent=2, ensure_ascii=False)
-            exit(0)
+            sys.exit(0)
         if not (args.config_path and args.pkg_path):
             logger.fatal("错误，-c 和 -s 参数必须同时提供")
-            exit(1)
+            sys.exit(1)
     finally:
         logger.info("解析参数完毕")
     return args
 
 
 class Modify:
-    def __init__(self, args):
+    """修改类的具体实现"""
+
+    def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.pkg_path, self.config_path, self.config = None, None, None
+        self.pkg_path, self.config_path, self.config = "", "", {}
         self.new_pkg_mode = False
 
-    def check_args(self):
+    def check_args(self) -> None:
+        """检验输入参数"""
         # 获取参数值
         logger.info("开始检查传入参数")
         config_path = self.args.config_path
@@ -103,12 +110,13 @@ class Modify:
         logger.debug(f"待处理的 conda 包或目录为 {pkg_path}")
         logger.info("检查传入参数完毕")
 
-    def run(self):
+    def run(self) -> None:
+        """具体实现逻辑"""
         # 1. 检查参数
         self.check_args()
         # 2. 读取配置
         logger.info("开始读取配置文件")
-        with open(self.config_path) as fin:
+        with open(self.config_path, encoding="utf-8") as fin:
             self.config = json.load(fin)
         # 3. 获取配置信息并检测配置
         pkg_infos = self.get_pkg_infos()
@@ -123,7 +131,8 @@ class Modify:
             self.handle_one_package(pkg_info)
         logger.info("修改完毕")
 
-    def get_pkg_infos(self):
+    def get_pkg_infos(self) -> List[Dict[str, Any]]:
+        """获取包的信息"""
         if os.path.isfile(self.pkg_path):
             pkg_paths = [self.pkg_path]
         else:
@@ -134,7 +143,8 @@ class Modify:
         return pkg_infos
 
     @staticmethod
-    def get_pkg_info(pkg_path):
+    def get_pkg_info(pkg_path: str) -> Dict[str, Any]:
+        """获取 conda 包的元信息"""
         dirname = os.path.dirname(pkg_path)
         basename = os.path.basename(pkg_path)
         basename_no_suffix = basename.replace(".tar.bz2", "").replace(".conda", "")
@@ -142,7 +152,7 @@ class Modify:
         comps = basename_no_suffix.split("-")
         other, version, build_str = comps[:-2], comps[-2], comps[-1]
         name = "-".join(other)
-        format = "tar.bz2" if ".tar.bz2" in pkg_path else "conda"
+        fmt = "tar.bz2" if ".tar.bz2" in pkg_path else "conda"
         binary_path = (
             os.path.join(extract_path, "pkg") if ".conda" in pkg_path else extract_path
         )
@@ -156,53 +166,36 @@ class Modify:
             "name_no_suffix": basename_no_suffix,
             "version": version,
             "build_str": build_str,
-            "format": format,
+            "format": fmt,
             "extract_path": extract_path,
             "binary_path": binary_path,
             "info_path": info_path,
             "real_info_path": real_info_path,
         }
 
-    def check_config(self, pkgs_infos):
+    def check_config(self, pkgs_infos: List[Any]) -> List[Any]:
+        """检查配置信息是否有误"""
         filter_pkgs_infos = []
         have_error, errors = False, defaultdict(list)
         for pkg_name, rule in self.config.items():
             # 1. pkg_name check
-            pkg_info = list(filter(lambda x: x.get("name") == pkg_name, pkgs_infos))
-            if len(pkg_info) == 0:
+            filter_pkg_info = list(
+                filter(lambda x: x.get("name") == pkg_name, pkgs_infos)
+            )
+            if len(filter_pkg_info) == 0:
                 have_error = True
                 msg = f"Error, no package named '{pkg_name}' found in '{self.pkg_path}'"
                 errors[pkg_name].append(msg)
 
-            if len(pkg_info) == 1:
-                pkg_info = pkg_info[0]
+            if len(filter_pkg_info) == 1:
+                pkg_info = filter_pkg_info[0]
                 self.extract_pkg(pkg_info)
+
                 # 2. rule check and transfer rule paths
                 if "add" in rule:
-                    add_rule_paths = [
-                        os.path.abspath(
-                            os.path.normpath(
-                                os.path.join(
-                                    os.path.dirname(self.config_path), add_path
-                                )
-                            )
-                        )
-                        for add_path in rule["add"]
-                    ]
-                    new_add_rules = {}
-                    for add_rule_path, add_path, new_path in zip(
-                        add_rule_paths, rule["add"].keys(), rule["add"].values()
-                    ):
-                        if not os.path.exists(add_rule_path):
-                            have_error = True
-                            msg = f"Error, add rule '{add_path}' not exists."
-                            errors[pkg_name].append(msg)
-                        new_path = os.path.join(pkg_info["binary_path"], new_path)
-                        if not os.path.isfile(new_path):
-                            new_path = os.path.join(
-                                new_path, os.path.basename(add_rule_path)
-                            )
-                        new_add_rules[add_rule_path] = new_path
+                    new_add_rules, errors = self.get_add_rule(
+                        rule, errors, pkg_name, pkg_info
+                    )
                     rule["add"] = new_add_rules
 
                 if "mv" in rule:
@@ -247,7 +240,37 @@ class Modify:
         filter_pkgs_infos.append(pkg_info)
         return filter_pkgs_infos
 
-    def handle_one_package(self, pkg_info):
+    def get_add_rule(
+        self,
+        rule: Dict[str, Any],
+        errors: defaultdict[Any, list[str]],
+        pkg_name: str,
+        pkg_info: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], defaultdict[Any, list[str]]]:
+        """获取添加规则"""
+        add_rule_paths = [
+            os.path.abspath(
+                os.path.normpath(
+                    os.path.join(os.path.dirname(self.config_path), add_path)
+                )
+            )
+            for add_path in rule["add"]
+        ]
+        new_add_rules = {}
+        for add_rule_path, add_path, new_path in zip(
+            add_rule_paths, rule["add"].keys(), rule["add"].values()
+        ):
+            if not os.path.exists(add_rule_path):
+                msg = f"Error, add rule '{add_path}' not exists."
+                errors[pkg_name].append(msg)
+            new_path = os.path.join(pkg_info["binary_path"], new_path)
+            if not os.path.isfile(new_path):
+                new_path = os.path.join(new_path, os.path.basename(add_rule_path))
+            new_add_rules[add_rule_path] = new_path
+        return new_add_rules, errors
+
+    def handle_one_package(self, pkg_info: Dict[str, Any]) -> None:
+        """处理一个 conda 包"""
         logger.info(f"开始处理 {pkg_info['path']}")
         rule = pkg_info["rule"]
         if "add" in rule:
@@ -274,11 +297,11 @@ class Modify:
                 )
 
         files_path = os.path.join(pkg_info["real_info_path"], "files")
-        with open(files_path, "w") as fout:
+        with open(files_path, "w", encoding="utf-8") as fout:
             fout.write("\n".join(files_list))
 
         has_prefix_path = os.path.join(pkg_info["real_info_path"], "has_prefix")
-        with open(has_prefix_path, "w") as fout:
+        with open(has_prefix_path, "w", encoding="utf-8") as fout:
             fout.write("\n".join(has_prefix_list))
 
         # 重新打包
@@ -311,6 +334,7 @@ class Modify:
                     # The compressor will error if size is not correct.
                     with tarfile.TarFile(fileobj=NullWriter(), mode="w") as sizer:  # type: ignore
                         for file in files:
+                            arcname = ""
                             if "pkg" in component:
                                 arcname = os.path.relpath(file, pkg_info["binary_path"])
                             if "info" in component:
@@ -322,41 +346,42 @@ class Modify:
                         component, "w", force_zip64=True
                     ) as component_file:
                         # only one stream_writer() per compressor() must be in use at a time
-                        component_stream = compress.stream_writer(
+                        with compress.stream_writer(
                             component_file, size=size, closefd=False
-                        )
-                        component_tar = tarfile.TarFile(
+                        ) as component_stream, tarfile.TarFile(
                             fileobj=component_stream, mode="w"
-                        )
-
-                        for file in files:
-                            if "pkg" in component:
-                                arcname = os.path.relpath(file, pkg_info["binary_path"])
-                            if "info" in component:
-                                arcname = os.path.relpath(file, pkg_info["info_path"])
-                            component_tar.add(
-                                file, filter=anonymize_tarinfo, arcname=arcname
-                            )
-                        component_tar.close()
-                        component_stream.close()
+                        ) as component_tar:
+                            for file in files:
+                                if "pkg" in component:
+                                    arcname = os.path.relpath(
+                                        file, pkg_info["binary_path"]
+                                    )
+                                if "info" in component:
+                                    arcname = os.path.relpath(
+                                        file, pkg_info["info_path"]
+                                    )
+                                component_tar.add(
+                                    file, filter=anonymize_tarinfo, arcname=arcname
+                                )
         if pkg_info["format"] == "tar.bz2":
             prefix = pkg_info["binary_path"]
             with tmp_chdir(prefix):
                 files = get_filelist(prefix)
-                with tarfile.open(dst_file, "w:bz2") as t:
+                with tarfile.open(dst_file, "w:bz2", encoding="utf-8") as t:
                     for f in files:
                         t.add(f, filter=anonymize_tarinfo)
         shutil.rmtree(extract_dir)
         logger.info(f"处理 {pkg_info['path']} 完毕")
 
-    def get_paths_json_data(self, pkg_info):
+    def get_paths_json_data(self, pkg_info: Dict[str, Any]) -> Tuple[str, Any]:
+        """从 paths.json 获取所有路径信息"""
         paths_json_path = os.path.join(pkg_info["real_info_path"], "paths.json")
-        with open(paths_json_path) as fin:
+        with open(paths_json_path, encoding="utf-8") as fin:
             paths_json_data = json.load(fin)
             return paths_json_path, paths_json_data
 
-    def handle_add_rule(self, pkg_info):
-        # 执行复制
+    def handle_add_rule(self, pkg_info: Dict[str, Any]) -> None:
+        """执行复制"""
         new_data = []
         add_rule = pkg_info["rule"]["add"]
         for old_path, new_path in add_rule.items():
@@ -375,11 +400,11 @@ class Modify:
         paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
         paths_json_data["paths"].extend(new_data)
         paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
-        with open(paths_json_path, "w") as fout:
+        with open(paths_json_path, "w", encoding="utf-8") as fout:
             fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
 
-    def handle_mv_rule(self, pkg_info):
-        # 执行移动或改名
+    def handle_mv_rule(self, pkg_info: Dict[str, Any]) -> None:
+        """执行移动或改名"""
         mv_rule = pkg_info["rule"]["mv"]
         for old_path, new_path in mv_rule.items():
             old_abs_path = os.path.join(pkg_info["binary_path"], old_path)
@@ -393,11 +418,11 @@ class Modify:
             )[0]
             old_path_info.update({"_path": new_path})
             paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
-            with open(paths_json_path, "w") as fout:
+            with open(paths_json_path, "w", encoding="utf-8") as fout:
                 fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
 
-    def handle_delete_rule(self, pkg_info):
-        # 执行删除操作
+    def handle_delete_rule(self, pkg_info: Dict[str, Any]) -> None:
+        """执行删除操作"""
         delete_rule = pkg_info["rule"]["delete"]
         for delete_path in delete_rule:
             delete_abs_path = os.path.join(pkg_info["binary_path"], delete_path)
@@ -418,10 +443,11 @@ class Modify:
             )
             paths_json_data["paths"] = new_paths_info
             paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
-            with open(paths_json_path, "w") as fout:
+            with open(paths_json_path, "w", encoding="utf-8") as fout:
                 fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
 
-    def extract_pkg(self, pkg_info):
+    def extract_pkg(self, pkg_info: Any) -> None:
+        """解压 conda 包"""
         pkg_path = pkg_info["path"]
         extract_format = pkg_info["format"]
         extract_path = pkg_info["extract_path"]
@@ -444,7 +470,8 @@ class Modify:
             )
 
     @staticmethod
-    def get_deleted_files(basedir, spec: pathspec.PathSpec):
+    def get_deleted_files(basedir: str, spec: pathspec.PathSpec) -> List[str]:
+        """获取待删除的文件列表"""
         delete_files = []
         for root, _, files in os.walk(basedir):
             for file in files:
@@ -455,7 +482,8 @@ class Modify:
         return delete_files
 
 
-def main():
+def main() -> None:
+    """主逻辑实现"""
     args = parse_args()
     instance = Modify(args)
     instance.run()

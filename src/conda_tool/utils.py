@@ -1,3 +1,5 @@
+"""Utils for module scripts"""
+
 import contextlib
 import hashlib
 import logging
@@ -7,7 +9,7 @@ import shutil
 import tarfile
 import tempfile
 import textwrap
-from typing import Generator, List, Sized, Union
+from typing import List, Sized, Union
 
 import zstandard
 from rich.console import Console
@@ -21,6 +23,7 @@ ZSTD_COMPRESS_THREADS = 1
 
 
 def setup_logging(terminal_width: Union[int, None] = None) -> None:
+    """设置日志格式"""
     logger = logging.getLogger("conda_tool")
     console = Console(width=terminal_width) if terminal_width else None
     rich_handler = RichHandler(
@@ -39,23 +42,27 @@ def setup_logging(terminal_width: Union[int, None] = None) -> None:
 
 
 def wrap_print(msg: str) -> None:
+    """包裹输出信息"""
     print(textwrap.fill(msg, width=TEXT_WIDTH))
 
 
 def wrap_input(msg: str) -> str:
+    """包裹 input"""
     return input(textwrap.fill(msg, width=TEXT_WIDTH, drop_whitespace=False))
 
 
 def get_choice(message: str, choices: List[str], default: int = 0) -> int:
+    """获取用户单一选择"""
     wrap_print(message + ":")
     for i, c in enumerate(choices):
-        print("  [%d] %s" % (i, c))
+        print(f"  [{i}] {c}")
     min_choice = 0
     max_choice = len(choices) - 1
     while True:
         choice = wrap_input(
-            "Please choose %d-%d (default: [%d]): " % (min_choice, max_choice, default)
+            f"Please choose {min_choice}-{max_choice} (default: [{default}]): "
         )
+
         if not choice:
             print(SEP_LINE)
             return default
@@ -69,6 +76,7 @@ def get_choice(message: str, choices: List[str], default: int = 0) -> int:
 
 
 def hash_files(paths: List[str], algorithm: str = "md5") -> str:
+    """获取多个文件的一个 hash 值"""
     h = hashlib.new(algorithm)
     for path in paths:
         with open(path, "rb") as fi:
@@ -81,6 +89,7 @@ def hash_files(paths: List[str], algorithm: str = "md5") -> str:
 
 
 def get_filelist(prefix: str, with_prefix: bool = False) -> List[str]:
+    """获取文件列表"""
     filelist = []
     for root, _, files in os.walk(prefix):
         for file in files:
@@ -111,12 +120,13 @@ def extract_zst(archive: str, out_path: str) -> None:
             z.extractall(out_path)
 
 
-def extract_archive(archive: str, out_path: str, format: str = "zip") -> None:
-    if format == "zst":
+def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
+    """解压压缩包"""
+    if fmt == "zst":
         extract_zst(archive, out_path)
-    elif format == "conda":
+    elif fmt == "conda":
         shutil.unpack_archive(archive, out_path, format="zip")
-    elif format in [
+    elif fmt in [
         "zip",
         "tar",
         "tar.gz",
@@ -129,11 +139,12 @@ def extract_archive(archive: str, out_path: str, format: str = "zip") -> None:
     ]:
         shutil.unpack_archive(archive, out_path)
     else:
-        raise ValueError(f"Unknown format {format} to extract.")
+        raise ValueError(f"Unknown format {fmt} to extract.")
 
 
 @contextlib.contextmanager
-def tmp_chdir(dest: str) -> Generator[None]:
+def tmp_chdir(dest: str):
+    """进入临时目录"""
     curdir = os.getcwd()
     try:
         os.chdir(dest)
@@ -162,15 +173,18 @@ class NullWriter:
     def __init__(self) -> None:
         self.size = 0
 
-    def write(self, bytes: Sized) -> int:
-        self.size += len(bytes)
-        return len(bytes)
+    def write(self, write_bytes: Sized) -> int:
+        """计算写的 bytes 数目"""
+        self.size += len(write_bytes)
+        return len(write_bytes)
 
     def tell(self) -> int:
+        """返回当前位置"""
         return self.size
 
 
 def compressor() -> zstandard.ZstdCompressor:
+    """定义一个压缩器"""
     return zstandard.ZstdCompressor(
         level=ZSTD_COMPRESS_LEVEL, threads=ZSTD_COMPRESS_THREADS
     )

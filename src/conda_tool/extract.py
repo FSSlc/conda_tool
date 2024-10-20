@@ -1,8 +1,12 @@
 #!/usr/bin/env python
 
+"""A tool to extract conda packages from a conda constructor sh package."""
+
 import argparse
+from typing import Tuple
 import os
 import shutil
+import sys
 from logging import getLogger
 
 from .utils import SCRIPT_DIR, setup_logging
@@ -11,9 +15,8 @@ setup_logging(120)
 logger = getLogger(__name__)
 
 
-def parse_args():
-    logger.info("开始解析参数")
-    # 创建 ArgumentParser 对象
+def parse_args() -> argparse.Namespace:
+    """解析命令行参数"""
     parser = argparse.ArgumentParser(description="conda sh 包解压工具")
 
     # 添加参数
@@ -49,7 +52,7 @@ def parse_args():
     # 检查源文件是否存在
     if not os.path.isfile(source_path):
         logger.fatal(f"错误：源文件 '{source_path}' 不存在")
-        exit(1)
+        sys.exit(1)
 
     # 检查目标目录是否存在，如果不存在则创建
     if not os.path.exists(output_dir):
@@ -60,46 +63,23 @@ def parse_args():
     logger.debug(f"sh 源文件路径 {source_path}")
     logger.debug(f"输出目录 {output_dir}")
 
-    logger.info("解析参数完毕")
     return args
 
 
 class Extractor:
-    def __init__(self, args):
+    """解压 conda constructor sh 包"""
+
+    def __init__(self, args: argparse.Namespace) -> None:
         self.source_path = args.source
         self.output_dir = args.output
         self.keep_tar = args.keep_tar
 
-    def run(self):
+    def run(self) -> None:
+        """执行具体的解压操作"""
         pkgs_dir = os.path.join(self.output_dir, "workdir/pkgs")
         os.makedirs(pkgs_dir, exist_ok=True)
 
-        logger.info("解析 sh 文件信息")
-        old_mode = False
-        script_data, conda_exec_data, pkgs_data = None, None, None
-        offset0, offset1, offset2 = 0, 0, 0
-        with open(self.source_path, "rb") as fin:
-            while True:
-                line = fin.readline()
-                if b"LINES" in line:
-                    old_mode = True
-                if b"boundary1=" in line:
-                    offset1 = int(line.split()[-2])
-                if b"boundary2=" in line:
-                    offset2 = int(line.split()[-2])
-                if b"@@END_HEADER@@" == line.strip():
-                    offset0 = fin.tell()
-                    fin.seek(0)
-                    script_data = fin.read(offset0)
-                    break
-
-            if old_mode:
-                pkgs_data = fin.read()
-            else:
-                fin.seek(offset0)
-                conda_exec_data = fin.read(offset1)
-                pkgs_data = fin.read(offset2)
-        logger.info("解析 sh 文件信息完毕")
+        old_mode, script_data, conda_exec_data, pkgs_data = self.parse_sh()
 
         logger.info("输出 sh 文件脚本内容")
         tpl_path = os.path.join(self.output_dir, "tpl.sh")
@@ -127,8 +107,39 @@ class Extractor:
             os.unlink(pkgs_path)
         logger.info("解压 sh 文件 conda 压缩包完毕")
 
+    def parse_sh(self) -> Tuple[bool, bytes, bytes, bytes]:
+        """读取 sh 获取必要信息"""
+        logger.info("解析 sh 文件信息")
+        old_mode = False
+        script_data, conda_exec_data, pkgs_data = b"", b"", b""
+        offset0, offset1, offset2 = 0, 0, 0
+        with open(self.source_path, "rb") as fin:
+            while True:
+                line = fin.readline()
+                if b"LINES" in line:
+                    old_mode = True
+                if b"boundary1=" in line:
+                    offset1 = int(line.split()[-2])
+                if b"boundary2=" in line:
+                    offset2 = int(line.split()[-2])
+                if b"@@END_HEADER@@" == line.strip():
+                    offset0 = fin.tell()
+                    fin.seek(0)
+                    script_data = fin.read(offset0)
+                    break
 
-def main():
+            if old_mode:
+                pkgs_data = fin.read()
+            else:
+                fin.seek(offset0)
+                conda_exec_data = fin.read(offset1)
+                pkgs_data = fin.read(offset2)
+        logger.info("解析 sh 文件信息完毕")
+        return old_mode, script_data, conda_exec_data, pkgs_data
+
+
+def main() -> None:
+    """主函数"""
     args = parse_args()
     extractor = Extractor(args)
     extractor.run()

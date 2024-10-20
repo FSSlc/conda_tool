@@ -48,6 +48,13 @@ version = { source = "file", path = "src/conda_tool/__init__.py" }
 [tool.pdm.build]
 source-includes = ["tests/", "scripts/"]
 
+[tool.pdm.dev-dependencies]
+lint = [
+    "pylint>=3.2.7",
+    "mypy>=1.12.1",
+    "ruff>=0.7.0",
+    "types-colorama>=0.4.15.20240311",
+]
 [tool.mypy]
 strict = true
 exclude = ["tests/assets/*"]

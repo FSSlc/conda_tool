@@ -10,8 +10,9 @@ import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures.process import ProcessPoolExecutor
 from logging import getLogger
-from typing import List, Tuple, Union
+from typing import Any, Dict, List, Union
 
 import ruamel.yaml
 from colorama import Fore, Style
@@ -28,10 +29,9 @@ url_p1 = re.compile(r"(^\s*-\s*)(.*)$")
 url_p2 = re.compile(r"(^\s*-?\s*url:\s*)(.*)$")
 url_p3 = re.compile(r"(^\s*-?\s*url:\s*)([^{]+)\{\{.*\}\}([^}]+)$")
 
-gl_errors = []
 
-
-def load_urls(meta_yaml: str) -> List[dict[str, str]]:
+def load_urls(meta_yaml: str) -> List[Dict[str, str]]:
+    """从 meta.yaml 中获取可下载的所有 url 地址"""
     loader = ruamel.yaml.YAML()
     with open(meta_yaml, encoding="utf8") as f:
         meta = loader.load(f)
@@ -53,16 +53,17 @@ def load_urls(meta_yaml: str) -> List[dict[str, str]]:
             if ht in item:
                 hash_type = ht
                 break
-        hash = item[hash_type]
+        file_hash = item[hash_type]
         fn = item.get("fn", None)
-        result.append({"url": url, "hash_type": hash_type, "hash": hash, "fn": fn})
+        result.append({"url": url, "hash_type": hash_type, "hash": file_hash, "fn": fn})
     return result
 
 
 def replace_urls(
-    meta_yaml_tpl: str, url_specs: List[dict[str, str]], pkgs_dir: str
+    meta_yaml_tpl: str, url_specs: List[Dict[str, str]], pkgs_dir: str
 ) -> None:
-    with open(meta_yaml_tpl) as f:
+    """替换 meta.yaml 中 url 地址"""
+    with open(meta_yaml_tpl, encoding="utf-8") as f:
         content = f.read().split("\n")
     url_blocks = []
     for ln, line in enumerate(content):
@@ -91,8 +92,7 @@ def replace_urls(
                 if "://" in line:
                     change_line = line
                     break
-                else:
-                    continue
+                continue
 
         if "{{" in change_line:
             if len(block_content) == 1:
@@ -112,10 +112,12 @@ def replace_urls(
 
         for url_spec in url_specs:
             if new_url is None:
-                url = url_spec.get("url")
+                url: Union[List[str], str] = url_spec.get("url")
                 if not isinstance(url, list):
-                    url = [url]
-                for u in url:
+                    urls = [url]
+                else:
+                    urls = url
+                for u in urls:
                     if re.match(new_url_pattern, u):
                         new_url = u
                         match_url_spec = url_spec
@@ -144,7 +146,8 @@ def replace_urls(
 
 
 def extract_reqs(meta_yaml: str) -> str:
-    with open(meta_yaml) as f:
+    """从 meta.yaml 中找出所依赖的包列表"""
+    with open(meta_yaml, encoding="utf-8") as f:
         content = f.read().split("\n")
     keys = ("host:", "run:", "build:", "run_constrained:")
     in_req = False
@@ -175,8 +178,9 @@ def extract_reqs(meta_yaml: str) -> str:
 
 
 def download(url: str, fn: str) -> Union[bool, Exception]:
+    """下载 url 到 fn"""
     try:
-        CHUNK_SIZE = 64 * 1024
+        chunk_size = 64 * 1024
         dest = os.path.dirname(fn)
         basefn = os.path.basename(fn)
         os.makedirs(dest, exist_ok=True)
@@ -189,7 +193,7 @@ def download(url: str, fn: str) -> Union[bool, Exception]:
                 print(f"oo Downloading {basefn} to {dest}\noo ", end="", flush=True)
                 blocks = 0
                 while True:
-                    s = f.read(CHUNK_SIZE)
+                    s = f.read(chunk_size)
                     if len(s) == 0:
                         break
                     print(".", end="", flush=True)
@@ -205,9 +209,9 @@ def download(url: str, fn: str) -> Union[bool, Exception]:
         return e
 
 
-def local_download(url: str, fn: str) -> None:
-    global gl_errors
-
+def local_download(url: str, fn: str) -> List[str]:
+    """包装 download"""
+    errors = []
     res = download(url, fn)
     if isinstance(res, bool) and res is True:
         print(f"\noo File saved to {fn}{Style.RESET_ALL}")
@@ -219,15 +223,19 @@ def local_download(url: str, fn: str) -> None:
             print(f"\noo File saved to {fn}{Style.RESET_ALL}")
         else:
             if res is False:
-                msg = f"{Fore.RED}oo Downloading error, Please download '{url}' by youself.{Style.RESET_ALL}"
-                gl_errors.append(msg)
+                msg = (
+                    f"{Fore.RED}oo Downloading error, "
+                    f"Please download '{url}' by youself.{Style.RESET_ALL}"
+                )
+                errors.append(msg)
                 print(msg)
             else:
-                gl_errors.append(str(res))
-                raise Exception(res)
+                errors.append(str(res))
+    return errors
 
 
-def download_file(para_pairs: Tuple) -> None:
+def download_file(para_pairs: tuple[dict[str, Any], Any | None, str]) -> None:
+    """下载文件"""
     url_spec, pkg, out_dir = para_pairs
     url = url_spec.get("url")
     if url_spec.get("fn") is not None:
@@ -245,12 +253,11 @@ def download_file(para_pairs: Tuple) -> None:
     if isinstance(url, list):
         url = url[0]
     if "github" in url:
-        #     url = os.path.join("https://ghproxy.net/", url)
         url = os.path.join("https://github.moeyy.xyz/", url)
 
     if os.path.exists(full_fn):
-        hash = hash_files([full_fn], url_spec.get("hash_type"))
-        if hash == url_spec.get("hash"):
+        file_hash = hash_files([full_fn], url_spec.get("hash_type"))
+        if file_hash == url_spec.get("hash"):
             print(f"{Fore.YELLOW}oo {fn} exists, skip downloading.{Style.RESET_ALL}")
         else:
             os.unlink(full_fn)
@@ -260,19 +267,21 @@ def download_file(para_pairs: Tuple) -> None:
 
 
 def url_basename(url: str) -> str:
+    """获取名称"""
     return os.path.basename(urllib.parse.urlparse(url).path)
 
 
-def get_pkg_spec(pkg: str, ver: str, py, ignore_py, pkg_db, interact):
-    global gl_errors
-
-    with open(pkg_db) as f:
-        pkg_db = json.load(f)
-    if pkg not in pkg_db:
+def get_pkg_spec(
+    pkg: str, ver: str, py: str, ignore_py: bool, pkg_db: str, interact: bool
+) -> Any:
+    """获取软件包的信息"""
+    errors = []
+    with open(pkg_db, encoding="utf-8") as f:
+        pkg_db_data = json.load(f)
+    if pkg not in pkg_db_data:
         msg = f"Requested package {pkg} is not in database"
-        gl_errors.append(msg)
-        raise ValueError(msg)
-    pkg_specs = pkg_db[pkg]
+        errors.append(msg)
+    pkg_specs = pkg_db_data[pkg]
     if interact:
         urls = [f'{spec.get("timestamp")}-{spec.get("url")}' for spec in pkg_specs]
         urls.sort()
@@ -298,17 +307,18 @@ def get_pkg_spec(pkg: str, ver: str, py, ignore_py, pkg_db, interact):
                 break
         if pkg_spec is None:
             msg = f"version {ver} of {pkg} is not found in the db"
-            gl_errors.append(msg)
-            raise ValueError(msg)
-    return pkg_spec
+            errors.append(msg)
+    return pkg_spec, errors
 
 
 def create_feedstock(
-    pkg_spec: dict,
-    workdir="workdir",
-    recipes_dir="recipes",
-    pkgs_dir="pkgs",
-):
+    pkg_spec: Dict[str, Any],
+    workdir: str = "workdir",
+    recipes_dir: str = "recipes",
+    pkgs_dir: str = "pkgs",
+) -> List[str]:
+    """创建 feestock"""
+    errors: list[str] = []
     pkg = pkg_spec.get("name")
     print(
         f"{Fore.GREEN}>> Creating feedstock for "
@@ -337,7 +347,7 @@ def create_feedstock(
             ".conda", ".tar.zst"
         )
         info_out_path = os.path.join(extract_dir, info_out_fn)
-        extract_archive(info_out_path, extract_dir, format="zst")
+        extract_archive(info_out_path, extract_dir, fmt="zst")
     else:
         extract_archive(out_fn, extract_dir)
 
@@ -367,16 +377,11 @@ def create_feedstock(
     print(f">> Downloading packages to {pkgs_dir} ...")
     url_specs = load_urls(meta_yaml)
 
-    from concurrent.futures.process import ProcessPoolExecutor
-
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
         para_pairs = list(
             zip(url_specs, [pkg] * len(url_specs), [pkgs_dir] * len(url_specs))
         )
         pool.map(download_file, para_pairs)
-
-    # for url_spec in url_specs:
-    #     download_file((url_spec, pkg, pkgs_dir))
 
     print(f"{Fore.GREEN}>> Replacing urls in {meta_yaml_tpl} ...{Style.RESET_ALL}")
     # fix: multi url replacements
@@ -400,9 +405,11 @@ def create_feedstock(
     print("-" * 80)
     print(deps)
     print("-" * 80)
+    return errors
 
 
 def get_abs_path(path: str) -> str:
+    """获取绝对路径"""
     if not os.path.isabs(path):
         script_dir = os.path.dirname(__file__)
         path = os.path.join(script_dir, path)
@@ -410,7 +417,8 @@ def get_abs_path(path: str) -> str:
     return path
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
+    """解析命令行参数"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "PKG_NAME", help="Package name without any version and build strings."
@@ -451,13 +459,13 @@ def parse_args():
     parser.add_argument(
         "--recipes-dir",
         metavar="DIR",
-        default="{SCRIPT_DIR}/recipes",
+        default=f"{SCRIPT_DIR}/recipes",
         help="Recipes directory (default: %(default)s)",
     )
     parser.add_argument(
         "--pkgs-dir",
         metavar="DIR",
-        default="{SCRIPT_DIR}/pkgs",
+        default=f"{SCRIPT_DIR}/pkgs",
         help="Source packages directory (default: %(default)s)",
     )
     args = parser.parse_args()
@@ -469,20 +477,25 @@ def parse_args():
     return args
 
 
-def main():
-    global gl_errors
+def main() -> None:
+    """函数主流程"""
+    gl_errors = []
 
     args = parse_args()
-    pkg_spec = get_pkg_spec(
+    pkg_spec, errors = get_pkg_spec(
         args.PKG_NAME, args.upper_bound, args.py, args.ignore_py, args.db, args.interact
     )
-
-    create_feedstock(
-        pkg_spec,
-        args.workdir,
-        args.recipes_dir,
-        args.pkgs_dir,
-    )
+    if errors:
+        gl_errors.extend(errors)
+    else:
+        errors = create_feedstock(
+            pkg_spec,
+            args.workdir,
+            args.recipes_dir,
+            args.pkgs_dir,
+        )
+        if errors:
+            gl_errors.extend(errors)
 
     if len(gl_errors) > 0:
         print(" Please check following error ".center(80, "-"))
