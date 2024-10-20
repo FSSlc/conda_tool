@@ -1,16 +1,18 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 
 import argparse
-import logging
 import os
 import shutil
+from logging import getLogger
 
-from utils import SCRIPT_DIR, setup_logging
+from .utils import SCRIPT_DIR, setup_logging
+
+setup_logging(120)
+logger = getLogger(__name__)
 
 
 def parse_args():
-    logging.info("开始解析参数")
+    logger.info("开始解析参数")
     # 创建 ArgumentParser 对象
     parser = argparse.ArgumentParser(description="conda sh 包解压工具")
 
@@ -46,23 +48,23 @@ def parse_args():
 
     # 检查源文件是否存在
     if not os.path.isfile(source_path):
-        logging.error(f"错误：源文件 '{source_path}' 不存在")
-        return
+        logger.fatal(f"错误：源文件 '{source_path}' 不存在")
+        exit(1)
 
     # 检查目标目录是否存在，如果不存在则创建
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        logging.info(f"目标目录 '{output_dir}' 已创建")
+        logger.info(f"目标目录 '{output_dir}' 已创建")
     if args.clean:
         shutil.rmtree(output_dir)
-    logging.debug(f"sh 源文件路径 {source_path}")
-    logging.debug(f"输出目录 {output_dir}")
+    logger.debug(f"sh 源文件路径 {source_path}")
+    logger.debug(f"输出目录 {output_dir}")
 
-    logging.info("解析参数完毕")
+    logger.info("解析参数完毕")
     return args
 
 
-class Extractor(object):
+class Extractor:
     def __init__(self, args):
         self.source_path = args.source
         self.output_dir = args.output
@@ -72,7 +74,7 @@ class Extractor(object):
         pkgs_dir = os.path.join(self.output_dir, "workdir/pkgs")
         os.makedirs(pkgs_dir, exist_ok=True)
 
-        logging.info("解析 sh 文件信息")
+        logger.info("解析 sh 文件信息")
         old_mode = False
         script_data, conda_exec_data, pkgs_data = None, None, None
         offset0, offset1, offset2 = 0, 0, 0
@@ -97,37 +99,36 @@ class Extractor(object):
                 fin.seek(offset0)
                 conda_exec_data = fin.read(offset1)
                 pkgs_data = fin.read(offset2)
-        logging.info("解析 sh 文件信息完毕")
+        logger.info("解析 sh 文件信息完毕")
 
-        logging.info("输出 sh 文件脚本内容")
+        logger.info("输出 sh 文件脚本内容")
         tpl_path = os.path.join(self.output_dir, "tpl.sh")
         with open(tpl_path, "wb") as fout:
             fout.write(script_data)
-        logging.info("输出 sh 文件脚本内容完毕")
+        logger.info("输出 sh 文件脚本内容完毕")
 
         if not old_mode:
-            logging.info("输出 sh 文件自带 conda 可执行程序")
+            logger.info("输出 sh 文件自带 conda 可执行程序")
             conda_exec_path = os.path.join(self.output_dir, "_conda")
             with open(conda_exec_path, "wb") as fout:
                 fout.write(conda_exec_data)
-            logging.info("输出 sh 文件自带 conda 可执行程序完毕")
+            logger.info("输出 sh 文件自带 conda 可执行程序完毕")
 
-        logging.info("输出 sh 文件 conda 包")
+        logger.info("输出 sh 文件 conda 包")
         pkgs_path = os.path.join(self.output_dir, "pkgs.tar")
         pkgs_output_dir = os.path.join(self.output_dir, "workdir")
         with open(pkgs_path, "wb") as fout:
             fout.write(pkgs_data)
-        logging.info("输出 sh 文件 conda 压缩包完毕")
+        logger.info("输出 sh 文件 conda 压缩包完毕")
 
-        logging.info("解压 sh 文件 conda 包完毕")
+        logger.info("解压 sh 文件 conda 包完毕")
         shutil.unpack_archive(pkgs_path, pkgs_output_dir, "tar")
         if not self.keep_tar:
             os.unlink(pkgs_path)
-        logging.info("解压 sh 文件 conda 压缩包完毕")
+        logger.info("解压 sh 文件 conda 压缩包完毕")
 
 
 def main():
-    setup_logging("extract.log")
     args = parse_args()
     extractor = Extractor(args)
     extractor.run()

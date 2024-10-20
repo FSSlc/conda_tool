@@ -1,19 +1,18 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 
 import argparse
 import json
-import logging
 import os
 import shutil
 import sys
 import tarfile
 from collections import defaultdict
+from logging import getLogger
 from zipfile import ZIP_STORED, ZipFile
 
 import pathspec
 
-from utils import (
+from .utils import (
     SCRIPT_DIR,
     NullWriter,
     anonymize_tarinfo,
@@ -25,19 +24,31 @@ from utils import (
     tmp_chdir,
 )
 
+setup_logging(120)
+logger = getLogger(__name__)
+
 CONDA_PACKAGE_FORMAT_VERSION = 2
+
+EXAMPLE_DATA = {
+    "conda": {
+        "add": {"extract.py": "bin"},
+        "mv": {"bin/conda": "bin/_conda"},
+        "delete": ["etc/fish", "xonsh"],
+    }
+}
 
 
 def parse_args():
-    logging.info("开始解析参数")
+    logger.info("开始解析参数")
     # 创建 ArgumentParser 对象
     parser = argparse.ArgumentParser(description="conda 包修改工具")
 
     # 添加参数
-    parser.add_argument("-c", "--config_path", required=True, help="配置文件路径")
     parser.add_argument(
-        "-s", "--pkg_path", required=True, help="待修改的 conda 包路径或目录"
+        "-oc", "--output_example_config", action="store_true", help="输出示例配置文件"
     )
+    parser.add_argument("-c", "--config_path", help="配置文件路径")
+    parser.add_argument("-s", "--pkg_path", help="待修改的 conda 包路径或目录")
     parser.add_argument(
         "-k",
         "--keep_origin",
@@ -45,15 +56,23 @@ def parse_args():
         required=False,
         help="是否保留原有 conda 包",
     )
+
     # 解析参数
     try:
         args = parser.parse_args()
+        if args.output_example_config:
+            with open("config.json", "w") as fout:
+                json.dump(EXAMPLE_DATA, fout, indent=2, ensure_ascii=False)
+            exit(0)
+        if not (args.config_path and args.pkg_path):
+            logger.fatal("错误，-c 和 -s 参数必须同时提供")
+            exit(1)
     finally:
-        logging.info("解析参数完毕")
+        logger.info("解析参数完毕")
     return args
 
 
-class Modify(object):
+class Modify:
     def __init__(self, args):
         self.args = args
         self.pkg_path, self.config_path, self.config = None, None, None
@@ -61,48 +80,48 @@ class Modify(object):
 
     def check_args(self):
         # 获取参数值
-        logging.info("开始检查传入参数")
+        logger.info("开始检查传入参数")
         config_path = self.args.config_path
         if not os.path.isabs(config_path):
             config_path = os.path.abspath(os.path.join(SCRIPT_DIR, config_path))
         # 检查源文件是否存在
         if not os.path.isfile(config_path):
-            logging.error(f"错误：配置文件 '{config_path}' 不存在")
-            logging.info("检查传入参数完毕")
+            logger.error(f"错误：配置文件 '{config_path}' 不存在")
+            logger.info("检查传入参数完毕")
             sys.exit(1)
         self.config_path = config_path
-        logging.debug(f"配置文件路径 {config_path}")
+        logger.debug(f"配置文件路径 {config_path}")
 
         pkg_path = self.args.pkg_path
         if not os.path.isabs(pkg_path):
             pkg_path = os.path.abspath(os.path.join(SCRIPT_DIR, pkg_path))
         if not os.path.exists(pkg_path):
-            logging.error(f"错误：conda 包路径或目录 {pkg_path}' 不存在")
-            logging.info("检查传入参数完毕")
+            logger.error(f"错误：conda 包路径或目录 {pkg_path}' 不存在")
+            logger.info("检查传入参数完毕")
             sys.exit(1)
         self.pkg_path = pkg_path
-        logging.debug(f"待处理的 conda 包或目录为 {pkg_path}")
-        logging.info("检查传入参数完毕")
+        logger.debug(f"待处理的 conda 包或目录为 {pkg_path}")
+        logger.info("检查传入参数完毕")
 
     def run(self):
         # 1. 检查参数
         self.check_args()
         # 2. 读取配置
-        logging.info("开始读取配置文件")
-        with open(self.config_path, "r") as fin:
+        logger.info("开始读取配置文件")
+        with open(self.config_path) as fin:
             self.config = json.load(fin)
         # 3. 获取配置信息并检测配置
         pkg_infos = self.get_pkg_infos()
-        logging.info("读取配置文件完毕")
+        logger.info("读取配置文件完毕")
 
-        logging.info("开始检查配置文件")
+        logger.info("开始检查配置文件")
         filter_pkgs_infos = self.check_config(pkg_infos)
-        logging.info("检查配置文件完毕")
+        logger.info("检查配置文件完毕")
 
         # 4. 修改文件并重新打包
         for pkg_info in filter_pkgs_infos:
             self.handle_one_package(pkg_info)
-        logging.info("修改完毕")
+        logger.info("修改完毕")
 
     def get_pkg_infos(self):
         if os.path.isfile(self.pkg_path):
@@ -195,7 +214,7 @@ class Modify(object):
                         )
                         for mv_path in rule["mv"]
                     ]
-                    for mv_rule_path, mv_path, new_path in zip(
+                    for mv_rule_path, mv_path, _ in zip(
                         mv_rule_paths, rule["mv"].keys(), rule["mv"].values()
                     ):
                         if not os.path.exists(mv_rule_path):
@@ -220,29 +239,29 @@ class Modify(object):
 
         if have_error:
             for name, error in errors.items():
-                logging.error(f"for package name '{name}', rule have following errors:")
+                logger.error(f"for package name '{name}', rule have following errors:")
                 error_msgs = ["  " + err for err in error]
                 for error_msg in error_msgs:
-                    logging.error(error_msg)
+                    logger.error(error_msg)
             sys.exit(2)
         filter_pkgs_infos.append(pkg_info)
         return filter_pkgs_infos
 
     def handle_one_package(self, pkg_info):
-        logging.info(f"开始处理 {pkg_info['path']}")
+        logger.info(f"开始处理 {pkg_info['path']}")
         rule = pkg_info["rule"]
         if "add" in rule:
-            logging.info("  开始处理 add 规则")
+            logger.info("  开始处理 add 规则")
             self.handle_add_rule(pkg_info)
-            logging.info("  处理 add 规则完毕")
+            logger.info("  处理 add 规则完毕")
         if "mv" in rule:
-            logging.info("  开始处理 mv 规则")
+            logger.info("  开始处理 mv 规则")
             self.handle_mv_rule(pkg_info)
-            logging.info("  处理 mv 规则完毕")
+            logger.info("  处理 mv 规则完毕")
         if "delete" in rule:
-            logging.info("  开始处理 delete 规则")
+            logger.info("  开始处理 delete 规则")
             self.handle_delete_rule(pkg_info)
-            logging.info("  处理 delete 规则完毕")
+            logger.info("  处理 delete 规则完毕")
 
         # 最后根据 paths.json 内容修改 files, has_prefix 文件
         _, paths_json_data = self.get_paths_json_data(pkg_info)
@@ -265,7 +284,7 @@ class Modify(object):
         # 重新打包
         extract_dir = pkg_info["extract_path"]
         dst_file = pkg_info["path"]
-        logging.info(f"  重新打包 {dst_file} 开始")
+        logger.info(f"  重新打包 {dst_file} 开始")
         if os.path.exists(dst_file):
             os.unlink(dst_file)
 
@@ -328,11 +347,11 @@ class Modify(object):
                     for f in files:
                         t.add(f, filter=anonymize_tarinfo)
         shutil.rmtree(extract_dir)
-        logging.info(f"处理 {pkg_info['path']} 完毕")
+        logger.info(f"处理 {pkg_info['path']} 完毕")
 
     def get_paths_json_data(self, pkg_info):
         paths_json_path = os.path.join(pkg_info["real_info_path"], "paths.json")
-        with open(paths_json_path, "r") as fin:
+        with open(paths_json_path) as fin:
             paths_json_data = json.load(fin)
             return paths_json_path, paths_json_data
 
@@ -437,9 +456,7 @@ class Modify(object):
 
 
 def main():
-    setup_logging("modify.log")
     args = parse_args()
-
     instance = Modify(args)
     instance.run()
 

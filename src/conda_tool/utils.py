@@ -1,0 +1,176 @@
+import contextlib
+import hashlib
+import logging
+import os
+import re
+import shutil
+import tarfile
+import tempfile
+import textwrap
+from typing import Generator, List, Sized, Union
+
+import zstandard
+from rich.console import Console
+from rich.logging import RichHandler
+
+SCRIPT_DIR = os.getcwd()
+TEXT_WIDTH = 78
+SEP_LINE = "-" * TEXT_WIDTH
+ZSTD_COMPRESS_LEVEL = 19
+ZSTD_COMPRESS_THREADS = 1
+
+
+def setup_logging(terminal_width: Union[int, None] = None) -> None:
+    logger = logging.getLogger("conda_tool")
+    console = Console(width=terminal_width) if terminal_width else None
+    rich_handler = RichHandler(
+        show_time=False,
+        rich_tracebacks=True,
+        tracebacks_show_locals=True,
+        markup=True,
+        show_path=False,
+        console=console,
+    )
+    rich_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(rich_handler)
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
+def wrap_print(msg: str) -> None:
+    print(textwrap.fill(msg, width=TEXT_WIDTH))
+
+
+def wrap_input(msg: str) -> str:
+    return input(textwrap.fill(msg, width=TEXT_WIDTH, drop_whitespace=False))
+
+
+def get_choice(message: str, choices: List[str], default: int = 0) -> int:
+    wrap_print(message + ":")
+    for i, c in enumerate(choices):
+        print("  [%d] %s" % (i, c))
+    min_choice = 0
+    max_choice = len(choices) - 1
+    while True:
+        choice = wrap_input(
+            "Please choose %d-%d (default: [%d]): " % (min_choice, max_choice, default)
+        )
+        if not choice:
+            print(SEP_LINE)
+            return default
+        if not re.match(r"\d+", choice):
+            continue
+        int_choice = int(choice)
+        if int_choice < 0 or int_choice >= len(choices):
+            continue
+        print(SEP_LINE)
+        return int_choice
+
+
+def hash_files(paths: List[str], algorithm: str = "md5") -> str:
+    h = hashlib.new(algorithm)
+    for path in paths:
+        with open(path, "rb") as fi:
+            while True:
+                chunk = fi.read(262144)
+                if not chunk:
+                    break
+                h.update(chunk)
+    return h.hexdigest()
+
+
+def get_filelist(prefix: str, with_prefix: bool = False) -> List[str]:
+    filelist = []
+    for root, _, files in os.walk(prefix):
+        for file in files:
+            file_path = os.path.join(root, file)
+            if with_prefix:
+                filelist.append(file_path)
+            else:
+                relative_path = os.path.relpath(file_path, start=prefix)
+                filelist.append(relative_path)
+    return filelist
+
+
+def extract_zst(archive: str, out_path: str) -> None:
+    """extract .zst file"""
+
+    if zstandard is None:
+        raise ImportError("pip install zstandard")
+
+    archive = os.path.abspath(archive)
+    out_path = os.path.abspath(out_path)
+    dctx = zstandard.ZstdDecompressor()
+
+    with tempfile.TemporaryFile(suffix=".tar") as ofh:
+        with open(archive, "rb") as ifh:
+            dctx.copy_stream(ifh, ofh)
+        ofh.seek(0)
+        with tarfile.open(fileobj=ofh) as z:
+            z.extractall(out_path)
+
+
+def extract_archive(archive: str, out_path: str, format: str = "zip") -> None:
+    if format == "zst":
+        extract_zst(archive, out_path)
+    elif format == "conda":
+        shutil.unpack_archive(archive, out_path, format="zip")
+    elif format in [
+        "zip",
+        "tar",
+        "tar.gz",
+        "tgz",
+        "gztar",
+        "bztar",
+        "tar.bz2",
+        "xztar",
+        "tar.zx",
+    ]:
+        shutil.unpack_archive(archive, out_path)
+    else:
+        raise ValueError(f"Unknown format {format} to extract.")
+
+
+@contextlib.contextmanager
+def tmp_chdir(dest: str) -> Generator[None]:
+    curdir = os.getcwd()
+    try:
+        os.chdir(dest)
+        yield
+    finally:
+        os.chdir(curdir)
+
+
+def anonymize_tarinfo(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo:
+    """
+    Remove user id, name from tarinfo.
+    """
+    # also remove timestamps?
+    tarinfo.uid = 0
+    tarinfo.uname = ""
+    tarinfo.gid = 0
+    tarinfo.gname = ""
+    return tarinfo
+
+
+class NullWriter:
+    """
+    zstd uses less memory on extract if size is known.
+    """
+
+    def __init__(self) -> None:
+        self.size = 0
+
+    def write(self, bytes: Sized) -> int:
+        self.size += len(bytes)
+        return len(bytes)
+
+    def tell(self) -> int:
+        return self.size
+
+
+def compressor() -> zstandard.ZstdCompressor:
+    return zstandard.ZstdCompressor(
+        level=ZSTD_COMPRESS_LEVEL, threads=ZSTD_COMPRESS_THREADS
+    )
