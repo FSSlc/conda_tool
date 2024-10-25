@@ -1,0 +1,8 @@
+# requirements.txt
+
+ruamel-yaml
+colorama
+packaging
+pathspec
+zstandard
+rich
