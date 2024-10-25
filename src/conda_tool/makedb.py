@@ -8,14 +8,17 @@ import json
 import os
 import urllib.request
 from collections import defaultdict
-from typing import Any, List
+from typing import Any
 
 from packaging.version import parse as PV
 
-from .utils import SCRIPT_DIR
+try:
+    from .utils import SCRIPT_DIR
+except ImportError:
+    from utils import SCRIPT_DIR
 
 
-def load_repodata(arches: List[str], forge_url: str) -> dict[str, Any]:
+def load_repodata(arches: list[str], forge_url: str) -> dict[str, Any]:
     """获取 repodata.json 数据"""
     data = {}
     for arch in arches:

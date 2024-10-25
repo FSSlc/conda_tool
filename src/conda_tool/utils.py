@@ -9,7 +9,7 @@ import shutil
 import tarfile
 import tempfile
 import textwrap
-from typing import List, Sized, Union
+from collections.abc import Sized
 
 import zstandard
 from rich.console import Console
@@ -22,7 +22,7 @@ ZSTD_COMPRESS_LEVEL = 19
 ZSTD_COMPRESS_THREADS = 1
 
 
-def setup_logging(terminal_width: Union[int, None] = None) -> None:
+def setup_logging(terminal_width: int | None = None) -> None:
     """设置日志格式"""
     logger = logging.getLogger("conda_tool")
     console = Console(width=terminal_width) if terminal_width else None
@@ -51,7 +51,7 @@ def wrap_input(msg: str) -> str:
     return input(textwrap.fill(msg, width=TEXT_WIDTH, drop_whitespace=False))
 
 
-def get_choice(message: str, choices: List[str], default: int = 0) -> int:
+def get_choice(message: str, choices: list[str], default: int = 0) -> int:
     """获取用户单一选择"""
     wrap_print(message + ":")
     for i, c in enumerate(choices):
@@ -75,7 +75,7 @@ def get_choice(message: str, choices: List[str], default: int = 0) -> int:
         return int_choice
 
 
-def hash_files(paths: List[str], algorithm: str = "md5") -> str:
+def hash_files(paths: list[str], algorithm: str = "md5") -> str:
     """获取多个文件的一个 hash 值"""
     h = hashlib.new(algorithm)
     for path in paths:
@@ -88,7 +88,7 @@ def hash_files(paths: List[str], algorithm: str = "md5") -> str:
     return h.hexdigest()
 
 
-def get_filelist(prefix: str, with_prefix: bool = False) -> List[str]:
+def get_filelist(prefix: str, with_prefix: bool = False) -> list[str]:
     """获取文件列表"""
     filelist = []
     for root, _, files in os.walk(prefix):

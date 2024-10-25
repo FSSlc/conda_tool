@@ -3,7 +3,7 @@ name = "conda_tool"
 dynamic = ["version"]
 description = "Conda Tool for download recipe, exctract constructor sh package, modify conda package."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [{ name = "FSSlc", email = "fsslc235@gmail.com" }]
 classifiers = [
     "Operating System :: OS Independent",
@@ -54,6 +54,9 @@ lint = [
     "mypy>=1.12.1",
     "ruff>=0.7.0",
     "types-colorama>=0.4.15.20240311",
+]
+dev = [
+    "ipython>=8.12.3",
 ]
 [tool.mypy]
 strict = true

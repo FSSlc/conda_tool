@@ -3,13 +3,16 @@
 """A tool to extract conda packages from a conda constructor sh package."""
 
 import argparse
-from typing import Tuple
 import os
 import shutil
 import sys
 from logging import getLogger
 
-from .utils import SCRIPT_DIR, setup_logging
+try:
+    from .utils import SCRIPT_DIR, setup_logging
+except ImportError:
+    from utils import SCRIPT_DIR, setup_logging
+
 
 setup_logging(120)
 logger = getLogger(__name__)
@@ -29,10 +32,21 @@ def parse_args() -> argparse.Namespace:
         help="目标目录路径",
     )
     parser.add_argument(
-        "-k", "--keep_tar", action="store_true", required=False, help="是否删除压缩包"
+        "-c",
+        "--clean",
+        action="store_true",
+        required=False,
+        help="是否清理已存在的输出目录",
     )
     parser.add_argument(
-        "-c", "--clean", action="store_true", required=False, help="是否清理输出目录"
+        "-gr",
+        "--generate_repo",
+        action="store_true",
+        required=False,
+        help="是否按照 subdir 整理 conda 包",
+    )
+    parser.add_argument(
+        "-k", "--keep_tar", action="store_true", required=False, help="是否删除压缩包"
     )
 
     # 解析参数
@@ -73,41 +87,19 @@ class Extractor:
         self.source_path = args.source
         self.output_dir = args.output
         self.keep_tar = args.keep_tar
+        self.generate_repo = args.generate_repo
 
     def run(self) -> None:
         """执行具体的解压操作"""
         pkgs_dir = os.path.join(self.output_dir, "workdir/pkgs")
         os.makedirs(pkgs_dir, exist_ok=True)
-
         old_mode, script_data, conda_exec_data, pkgs_data = self.parse_sh()
+        self.extract_script(script_data)
+        self.extract_conda_exec(old_mode, conda_exec_data)
+        self.extract_payload(pkgs_data)
+        self.extract_tar()
 
-        logger.info("输出 sh 文件脚本内容")
-        tpl_path = os.path.join(self.output_dir, "tpl.sh")
-        with open(tpl_path, "wb") as fout:
-            fout.write(script_data)
-        logger.info("输出 sh 文件脚本内容完毕")
-
-        if not old_mode:
-            logger.info("输出 sh 文件自带 conda 可执行程序")
-            conda_exec_path = os.path.join(self.output_dir, "_conda")
-            with open(conda_exec_path, "wb") as fout:
-                fout.write(conda_exec_data)
-            logger.info("输出 sh 文件自带 conda 可执行程序完毕")
-
-        logger.info("输出 sh 文件 conda 包")
-        pkgs_path = os.path.join(self.output_dir, "pkgs.tar")
-        pkgs_output_dir = os.path.join(self.output_dir, "workdir")
-        with open(pkgs_path, "wb") as fout:
-            fout.write(pkgs_data)
-        logger.info("输出 sh 文件 conda 压缩包完毕")
-
-        logger.info("解压 sh 文件 conda 包完毕")
-        shutil.unpack_archive(pkgs_path, pkgs_output_dir, "tar")
-        if not self.keep_tar:
-            os.unlink(pkgs_path)
-        logger.info("解压 sh 文件 conda 压缩包完毕")
-
-    def parse_sh(self) -> Tuple[bool, bytes, bytes, bytes]:
+    def parse_sh(self) -> tuple[bool, bytes, bytes, bytes]:
         """读取 sh 获取必要信息"""
         logger.info("解析 sh 文件信息")
         old_mode = False
@@ -136,6 +128,69 @@ class Extractor:
                 pkgs_data = fin.read(offset2)
         logger.info("解析 sh 文件信息完毕")
         return old_mode, script_data, conda_exec_data, pkgs_data
+
+    def extract_script(self, script_data):
+        """输出 sh 文件脚本内容"""
+        logger.info("输出 sh 文件脚本内容")
+        tpl_path = os.path.join(self.output_dir, "tpl.sh")
+        with open(tpl_path, "wb") as fout:
+            fout.write(script_data)
+        logger.info("输出 sh 文件脚本内容完毕")
+
+    def extract_conda_exec(self, old_mode, conda_exec_data):
+        """输出 sh 文件自带 conda 可执行程序"""
+        if not old_mode:
+            logger.info("输出 sh 文件自带 conda 可执行程序")
+            conda_exec_path = os.path.join(self.output_dir, "_conda")
+            with open(conda_exec_path, "wb") as fout:
+                fout.write(conda_exec_data)
+            logger.info("输出 sh 文件自带 conda 可执行程序完毕")
+
+    def extract_payload(self, pkgs_data):
+        """输出 sh 文件 conda 包"""
+        logger.info("输出 sh 文件 conda 包")
+        pkgs_path = os.path.join(self.output_dir, "pkgs.tar")
+        with open(pkgs_path, "wb") as fout:
+            fout.write(pkgs_data)
+        logger.info("输出 sh 文件 conda 压缩包完毕")
+
+    def extract_tar(self):
+        """解压 sh 文件 conda 包"""
+        logger.info("解压 sh 文件 conda 包")
+        pkgs_path = os.path.join(self.output_dir, "pkgs.tar")
+        pkgs_output_dir = os.path.join(self.output_dir, "workdir")
+        conda_pkgs_dir = os.path.join(pkgs_output_dir, "pkgs")
+
+        shutil.unpack_archive(pkgs_path, pkgs_output_dir, "tar")
+
+        self.make_repo(pkgs_path, conda_pkgs_dir, pkgs_output_dir)
+        if not self.keep_tar:
+            os.unlink(pkgs_path)
+        logger.info("解压 sh 文件 conda 压缩包完毕")
+
+    def make_repo(self, pkgs_dir, conda_pkgs_dir, pkgs_output_dir):
+        """按照 conda channel 形式组织 conda 包"""
+        if self.generate_repo:
+            # preconda
+            preconda_dir = os.path.join(pkgs_output_dir, "preconda")
+            os.makedirs(preconda_dir, exist_ok=True)
+            shutil.unpack_archive(
+                os.path.join(pkgs_output_dir, "preconda.tar.bz2"), preconda_dir, "bztar"
+            )
+            urls_txt = os.path.join(preconda_dir, "pkgs/urls.txt")
+            subdir_pkgname_dict = {}
+            with open(urls_txt, encoding="utf-8") as fout:
+                urls = fout.readlines()
+                for line in urls:
+                    subdir, pkgname = line.strip().split("/")[-2:]
+                    subdir_pkgname_dict[pkgname.strip()] = subdir.strip()
+            subdirs = list(set(subdir_pkgname_dict.values()))
+            for subdir in subdirs:
+                os.makedirs(os.path.join(conda_pkgs_dir, subdir), exist_ok=True)
+            for conda_pkg in os.listdir(conda_pkgs_dir):
+                new_dir = os.path.join(conda_pkgs_dir, subdir_pkgname_dict[conda_pkg])
+                shutil.move(os.path.join(pkgs_dir, conda_pkg), new_dir)
+            shutil.rmtree(preconda_dir)
 
 
 def main() -> None:
