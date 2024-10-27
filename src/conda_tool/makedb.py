@@ -6,6 +6,8 @@ import argparse
 import bz2
 import json
 import os
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from typing import Any
@@ -22,15 +24,20 @@ def load_repodata(arches: list[str], forge_url: str) -> dict[str, Any]:
     """获取 repodata.json 数据"""
     data = {}
     for arch in arches:
-        url = os.path.join(forge_url, f"{arch}/repodata.json.bz2")
+        if not forge_url.endswith("/"):
+            forge_url += "/"
+        url = urllib.parse.urljoin(forge_url, f"{arch}/repodata.json.bz2")
         print(f"Connecting to {url} ...")
-        with urllib.request.urlopen(url) as f:
-            print(f"Loading {url} ...")
-            repodata = bz2.decompress(f.read())
-            print(f"Parsing {url} ...")
-            repodata = json.loads(repodata)
-            data.update(repodata["packages"])
-            data.update(repodata["packages.conda"])
+        try:
+            with urllib.request.urlopen(url) as f:
+                print(f"Loading {url} ...")
+                repodata = bz2.decompress(f.read())
+                print(f"Parsing {url} ...")
+                repodata = json.loads(repodata)
+                data.update(repodata["packages"])
+                data.update(repodata["packages.conda"])
+        except urllib.error.HTTPError as e:
+            print(f"Error, download '{url}' failed, details: '{str(e)}'")
     if not os.path.exists(f"{SCRIPT_DIR}/data"):
         os.makedirs(f"{SCRIPT_DIR}/data")
     with open(f"{SCRIPT_DIR}/data/data.json", "w", encoding="utf8", newline="\n") as f:
@@ -51,9 +58,10 @@ def parse_repodata(data: Any, out: str, forge_url: str) -> None:
                 "name": n,
                 "version": v,
                 "nv": f"{n}-{v}",
+                "depends": deps,
                 "md5": p["md5"],
                 "build": p["build"],
-                "depends": deps,
+                "subdir": p['subdir'],
                 "timestamp": p.get("timestamp", 0),
                 "url": f"{forge_url}/{p['subdir']}/{pn}",
             }
