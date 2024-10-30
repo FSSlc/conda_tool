@@ -51,16 +51,11 @@ source-includes = ["tests/", "scripts/"]
 [tool.pdm.dev-dependencies]
 lint = [
     "pylint>=3.2.7",
-    "mypy>=1.12.1",
     "ruff>=0.7.0",
-    "types-colorama>=0.4.15.20240311",
 ]
 dev = [
     "ipython>=8.12.3",
 ]
-[tool.mypy]
-strict = true
-exclude = ["tests/assets/*"]
 
 [tool.ruff.lint]
 select = [

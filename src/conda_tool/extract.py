@@ -163,7 +163,7 @@ class Extractor:
 
         shutil.unpack_archive(pkgs_path, pkgs_output_dir, "tar")
 
-        self.make_repo(pkgs_path, conda_pkgs_dir, pkgs_output_dir)
+        self.make_repo(conda_pkgs_dir, conda_pkgs_dir, pkgs_output_dir)
         if not self.keep_tar:
             os.unlink(pkgs_path)
         logger.info("解压 sh 文件 conda 压缩包完毕")
@@ -188,8 +188,11 @@ class Extractor:
             for subdir in subdirs:
                 os.makedirs(os.path.join(conda_pkgs_dir, subdir), exist_ok=True)
             for conda_pkg in os.listdir(conda_pkgs_dir):
-                new_dir = os.path.join(conda_pkgs_dir, subdir_pkgname_dict[conda_pkg])
-                shutil.move(os.path.join(pkgs_dir, conda_pkg), new_dir)
+                if conda_pkg not in subdirs:
+                    new_dir = os.path.join(
+                        conda_pkgs_dir, subdir_pkgname_dict[conda_pkg]
+                    )
+                    shutil.move(os.path.join(pkgs_dir, conda_pkg), new_dir)
             shutil.rmtree(preconda_dir)
 
 

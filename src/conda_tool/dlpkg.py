@@ -91,25 +91,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--db",
-        default=f"{SCRIPT_DIR}/data/pkgdb.json",
+        default=f"{os.path.join(SCRIPT_DIR, 'data', 'pkgdb.json')}",
         help="Package database file (default: %(default)s)",
     )
     parser.add_argument(
         "--workdir",
         metavar="WORKDIR",
-        default=f"{SCRIPT_DIR}/workdir",
+        default=f"{os.path.join(SCRIPT_DIR, 'workdir')}",
         help="Workdir for downloading (default: %(default)s)",
     )
     parser.add_argument(
         "--recipes-dir",
         metavar="DIR",
-        default=f"{SCRIPT_DIR}/recipes",
+        default=f"{os.path.join(SCRIPT_DIR, 'recipes')}",
         help="Recipes directory (default: %(default)s)",
     )
     parser.add_argument(
         "--pkgs-dir",
         metavar="DIR",
-        default=f"{SCRIPT_DIR}/pkgs",
+        default=f"{os.path.join(SCRIPT_DIR, 'pkgs')}",
         help="Source packages directory (default: %(default)s)",
     )
     args = parser.parse_args()
@@ -130,10 +130,10 @@ class DownloadPkg:
         self.pkg_name = self.args.PKGNAME
         self.pkgs_dir = self.args.pkgs_dir
         self.recipes_dir = self.args.recipes_dir
+        self.errors = Manager().list()
 
     def run(self):
         """主要实现逻辑"""
-        self.errors = Manager().list()
 
         pkg_spec = self.get_pkg_spec()
         self.create_feedstock(pkg_spec)
@@ -154,7 +154,8 @@ class DownloadPkg:
             pkg_db_data = json.load(f)
         if self.pkg_name not in pkg_db_data:
             print(
-                f"{Fore.RED}oo Requested package {self.pkg_name} is not in database{Style.RESET_ALL}"
+                f"{Fore.RED}oo Requested package {self.pkg_name}"
+                + f" is not in database{Style.RESET_ALL}"
             )
             sys.exit(1)
         pkg_specs = pkg_db_data[self.pkg_name]
@@ -169,7 +170,13 @@ class DownloadPkg:
                 )
 
         if self.args.subdir:
-            filter_pkg_specs = list(filter(lambda x: self.args.subdir == x.get("subdir") or x.get("subdir") == "noarch", pkg_specs))
+            filter_pkg_specs = list(
+                filter(
+                    lambda x: self.args.subdir == x.get("subdir")
+                    or x.get("subdir") == "noarch",
+                    pkg_specs,
+                )
+            )
             if len(filter_pkg_specs) > 0:
                 pkg_specs = list(filter_pkg_specs)
             else:
@@ -181,31 +188,34 @@ class DownloadPkg:
             pkg_spec = pkg_specs[-1]  # the newest version
         else:
             if self.args.interact:
-                pkg_specs = [p for p in reversed(pkg_specs) if PV(p["version"]) == PV(ver)]
+                pkg_specs = [
+                    p for p in reversed(pkg_specs) if PV(p["version"]) == PV(ver)
+                ]
                 if len(pkg_specs) == 0:
                     print(
                         f"{Fore.RED}version {ver} of {self.pkg_name} "
                         f"is not found in the db{Style.RESET_ALL}"
                     )
                     sys.exit(1)
-                urls = [f'{spec.get("timestamp")}-{spec.get("url")}' for spec in pkg_specs]
+                urls = [
+                    f'{spec.get("timestamp")}-{spec.get("url")}' for spec in pkg_specs
+                ]
                 urls.sort()
                 choice = get_choice(
                     "Please choose a package to download", urls, default=len(urls) - 1
                 )
                 return pkg_specs[choice]
-            else:
-                pkg_spec = None
-                for p in reversed(pkg_specs):
-                    if PV(p["version"]) <= PV(ver):
-                        pkg_spec = p
-                        break
-                if pkg_spec is None:
-                    print(
-                        f"{Fore.RED}version {ver} of {self.pkg_name} "
-                        f"is not found in the db{Style.RESET_ALL}"
-                    )
-                    sys.exit(1)
+            pkg_spec = None
+            for p in reversed(pkg_specs):
+                if PV(p["version"]) <= PV(ver):
+                    pkg_spec = p
+                    break
+            if pkg_spec is None:
+                print(
+                    f"{Fore.RED}version {ver} of {self.pkg_name} "
+                    f"is not found in the db{Style.RESET_ALL}"
+                )
+                sys.exit(1)
         return pkg_spec
 
     def create_feedstock(self, pkg_spec: dict[str, Any]) -> list[str]:
@@ -252,7 +262,6 @@ class DownloadPkg:
         with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
             pool.map(self.download_file, para_pairs)
 
-
         print(f"{Fore.GREEN}>> Replacing urls in {meta_yaml_tpl} ...{Style.RESET_ALL}")
         self.replace_urls(meta_yaml_tpl, url_specs)
         if os.path.exists(os.path.join(old_recipe, "parent")):
@@ -291,10 +300,15 @@ class DownloadPkg:
         url_spec.update({"fn": fn})
         full_fn = os.path.join(out_dir, fn)
 
+        dl_urls = url
         if not isinstance(url, list):
             dl_urls = [url]
-            dl_urls = [urllib.parse.urljoin("https://github.moeyy.xyz/", u) if "github" in u else u 
-                       for u in dl_urls]
+        dl_urls = [
+            urllib.parse.urljoin("https://github.moeyy.xyz/", u)
+            if "github" in u
+            else u
+            for u in dl_urls
+        ]
 
         if os.path.exists(full_fn):
             file_hash = hash_files([full_fn], url_spec.get("hash_type"))
@@ -315,22 +329,20 @@ class DownloadPkg:
             if isinstance(res, bool) and res is True:
                 print(f"\noo File saved to {fn}{Style.RESET_ALL}")
                 return
+            # 重试一次
+            print(f"{Fore.RED}oo Downloading error, retry once.{Style.RESET_ALL}")
+            res = self.download(url, fn)
+            if isinstance(res, bool) and res is True:
+                print(f"\noo File saved to {fn}{Style.RESET_ALL}")
+                return
+            if res is False:
+                msg = (
+                    f"{Fore.RED}oo Downloading error, "
+                    f"Please download '{url}' by youself.{Style.RESET_ALL}"
+                )
+                self.errors.append(msg)
             else:
-                # 重试一次
-                print(f"{Fore.RED}oo Downloading error, retry once.{Style.RESET_ALL}")
-                res = self.download(url, fn)
-                if isinstance(res, bool) and res is True:
-                    print(f"\noo File saved to {fn}{Style.RESET_ALL}")
-                    return
-                else:
-                    if res is False:
-                        msg = (
-                            f"{Fore.RED}oo Downloading error, "
-                            f"Please download '{url}' by youself.{Style.RESET_ALL}"
-                        )
-                        self.errors.append(msg)
-                    else:
-                        self.errors.append(str(res))
+                self.errors.append(str(res))
 
     @staticmethod
     def download(url: str, fn: str) -> bool | Exception:
@@ -480,22 +492,22 @@ class DownloadPkg:
             block_content = content[block[0] : block[1]]
 
             m, new_url, match_url_spec = self.get_new_url(block_content, url_specs)
-
-            fn = os.path.basename(urllib.parse.urlparse(new_url).path)
-            if match_url_spec.get("fn") is not None:
-                fn = match_url_spec.get("fn")
-            pkg_path = os.path.join(self.pkgs_dir, fn)
-            pkg_path = os.path.relpath(pkg_path, os.path.dirname(meta_yaml_tpl))
-            if len(block_content) == 1:
-                new_contents.append(m.group(1) + pkg_path)
-                # 原有的 source 加上注释
-                comment_block_content = "#" + block_content[0]
-                new_contents.append(comment_block_content)
-            else:
-                new_contents.append(block_content[0] + " " + pkg_path)
-                # 原有的 source 加上注释
-                comment_block_content = ["#" + line for line in block_content]
-                new_contents.extend(comment_block_content)
+            if match_url_spec is not None:
+                fn = os.path.basename(urllib.parse.urlparse(new_url).path)
+                if match_url_spec.get("fn") is not None:
+                    fn = match_url_spec.get("fn")
+                pkg_path = os.path.join(self.pkgs_dir, fn)
+                pkg_path = os.path.relpath(pkg_path, os.path.dirname(meta_yaml_tpl))
+                if len(block_content) == 1:
+                    new_contents.append(m.group(1) + pkg_path)
+                    # 原有的 source 加上注释
+                    comment_block_content = "#" + block_content[0]
+                    new_contents.append(comment_block_content)
+                else:
+                    new_contents.append(block_content[0] + " " + pkg_path)
+                    # 原有的 source 加上注释
+                    comment_block_content = ["#" + line for line in block_content]
+                    new_contents.extend(comment_block_content)
             if idx != (len(url_specs) - 1):
                 # pylint: disable-next=unnecessary-list-index-lookup
                 new_contents += content[url_blocks[idx][1] : url_blocks[idx + 1][0]]
