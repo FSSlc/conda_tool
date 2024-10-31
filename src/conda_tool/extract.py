@@ -9,9 +9,9 @@ import sys
 from logging import getLogger
 
 try:
-    from .utils import SCRIPT_DIR, setup_logging
+    from .utils import SCRIPT_DIR, extract_large_tar, setup_logging
 except ImportError:
-    from utils import SCRIPT_DIR, setup_logging
+    from utils import SCRIPT_DIR, extract_large_tar, setup_logging
 
 
 setup_logging(120)
@@ -161,38 +161,43 @@ class Extractor:
         pkgs_output_dir = os.path.join(self.output_dir, "workdir")
         conda_pkgs_dir = os.path.join(pkgs_output_dir, "pkgs")
 
-        shutil.unpack_archive(pkgs_path, pkgs_output_dir, "tar")
+        extract_large_tar(pkgs_path, pkgs_output_dir)
 
-        self.make_repo(conda_pkgs_dir, conda_pkgs_dir, pkgs_output_dir)
+        if self.generate_repo:
+            self.make_repo(conda_pkgs_dir, pkgs_output_dir)
         if not self.keep_tar:
             os.unlink(pkgs_path)
         logger.info("解压 sh 文件 conda 压缩包完毕")
 
-    def make_repo(self, pkgs_dir, conda_pkgs_dir, pkgs_output_dir):
+    def make_repo(self, conda_pkgs_dir, pkgs_output_dir):
         """按照 conda channel 形式组织 conda 包"""
-        if self.generate_repo:
-            # preconda
+        urls_txt = os.path.join(conda_pkgs_dir, "urls.txt")
+        if not os.path.exists(urls_txt):
             preconda_dir = os.path.join(pkgs_output_dir, "preconda")
             os.makedirs(preconda_dir, exist_ok=True)
             shutil.unpack_archive(
                 os.path.join(pkgs_output_dir, "preconda.tar.bz2"), preconda_dir, "bztar"
             )
             urls_txt = os.path.join(preconda_dir, "pkgs/urls.txt")
-            subdir_pkgname_dict = {}
-            with open(urls_txt, encoding="utf-8") as fout:
-                urls = fout.readlines()
-                for line in urls:
-                    subdir, pkgname = line.strip().split("/")[-2:]
-                    subdir_pkgname_dict[pkgname.strip()] = subdir.strip()
-            subdirs = list(set(subdir_pkgname_dict.values()))
-            for subdir in subdirs:
-                os.makedirs(os.path.join(conda_pkgs_dir, subdir), exist_ok=True)
-            for conda_pkg in os.listdir(conda_pkgs_dir):
-                if conda_pkg not in subdirs:
-                    new_dir = os.path.join(
-                        conda_pkgs_dir, subdir_pkgname_dict[conda_pkg]
-                    )
-                    shutil.move(os.path.join(pkgs_dir, conda_pkg), new_dir)
+        subdir_pkgname_dict = {}
+        with open(urls_txt, encoding="utf-8") as fout:
+            urls = fout.readlines()
+            for line in urls:
+                subdir, pkgname = line.strip().split("/")[-2:]
+                subdir_pkgname_dict[pkgname.strip()] = subdir.strip()
+        subdirs = list(set(subdir_pkgname_dict.values()))
+        for subdir in subdirs:
+            os.makedirs(os.path.join(conda_pkgs_dir, subdir), exist_ok=True)
+        conda_pkg_names = [
+            name
+            for name in os.listdir(conda_pkgs_dir)
+            if name.endswith(".tar.bz2") or name.endswith(".conda")
+        ]
+        for conda_pkg in conda_pkg_names:
+            if conda_pkg not in subdirs:
+                new_dir = os.path.join(conda_pkgs_dir, subdir_pkgname_dict[conda_pkg])
+                shutil.move(os.path.join(conda_pkgs_dir, conda_pkg), new_dir)
+        if os.path.exists(preconda_dir):
             shutil.rmtree(preconda_dir)
 
 

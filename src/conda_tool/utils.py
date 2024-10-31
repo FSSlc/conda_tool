@@ -1,6 +1,7 @@
 """Utils for module scripts"""
 
 import contextlib
+import gc
 import hashlib
 import logging
 import os
@@ -140,6 +141,57 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
         shutil.unpack_archive(archive, out_path)
     else:
         raise ValueError(f"Unknown format {fmt} to extract.")
+
+
+def extract_large_tar(tar_path, extract_path, chunk_size=8192, debug=False):
+    """高效解压大型 tar 文件的函数"""
+    try:
+        os.makedirs(extract_path, exist_ok=True)
+
+        with tarfile.open(tar_path, "r:*") as tar:
+            # 获取所有成员
+            members = tar.getmembers()
+            total_files = len(members)
+
+            for index, member in enumerate(members, 1):
+                try:
+                    if debug:
+                        print(
+                            f"进度：{index:03d}/{total_files:03d} ({(index/total_files)*100:06.2f}%)"
+                            + f" - {member.name}"
+                        )
+
+                    # 如果是文件（不是目录）
+                    if member.isfile():
+                        # 创建目标文件的目录结构
+                        target_path = os.path.join(extract_path, member.name)
+                        target_dir = os.path.dirname(target_path)
+                        os.makedirs(target_dir, exist_ok=True)
+
+                        # 以流式方式提取文件
+                        source = tar.extractfile(member)
+                        if source is not None:
+                            with open(target_path, "wb") as target:
+                                while True:
+                                    chunk = source.read(chunk_size)
+                                    if not chunk:
+                                        break
+                                    target.write(chunk)
+                            source.close()
+                    else:
+                        # 对于目录，直接创建
+                        tar.extract(member, extract_path)
+                    # 定期进行垃圾回收
+                    if index % 100 == 0:
+                        gc.collect()
+                except Exception as e:
+                    print(f"警告：解压文件 {member.name} 时出错：{str(e)}")
+                    continue
+        if debug:
+            print("解压完成！")
+
+    except Exception as e:
+        print(f"错误：{str(e)}")
 
 
 @contextlib.contextmanager
