@@ -3,7 +3,6 @@
 """A tool to create a feedstock directly from a conda-forge package"""
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -16,7 +15,9 @@ from logging import getLogger
 from multiprocessing import Manager
 from typing import Any
 
+import msgpack
 import ruamel.yaml
+import zstandard
 from colorama import Fore, Style
 from packaging.version import parse as PV
 
@@ -75,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--subdir",
+        default="linux-64",
         choices=["noarch", "linux-64", "linux-aarch64", "win-64", "win-arm64"],
         help="subdir for conda pkg",
     )
@@ -91,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--db",
-        default=f"{os.path.join(SCRIPT_DIR, 'data', 'pkgdb.json')}",
+        default=f"{os.path.join(SCRIPT_DIR, 'data', 'pkgdb.zstd')}",
         help="Package database file (default: %(default)s)",
     )
     parser.add_argument(
@@ -136,7 +138,7 @@ class DownloadPkg:
         """主要实现逻辑"""
 
         pkg_spec = self.get_pkg_spec()
-        self.create_feedstock(pkg_spec)
+        self.create_feedstock(pkg_spec)  # type: ignore
 
         if len(self.errors) > 0:
             print(" Please check following error ".center(80, "-"))
@@ -150,18 +152,20 @@ class DownloadPkg:
         py = self.args.py
         ver = self.args.upper_bound
 
-        with open(self.args.db, encoding="utf-8") as f:
-            pkg_db_data = json.load(f)
+        pkg_db_data = {}
+        dctx = zstandard.ZstdDecompressor()
+        with open(self.args.db, "rb") as f:
+            pkg_db_data = msgpack.loads(dctx.decompress(f.read()))
         if self.pkg_name not in pkg_db_data:
             print(
                 f"{Fore.RED}oo Requested package {self.pkg_name}"
                 + f" is not in database{Style.RESET_ALL}"
             )
             sys.exit(1)
-        pkg_specs = pkg_db_data[self.pkg_name]
+        pkg_specs = list(pkg_db_data[self.pkg_name])  # type: ignore
 
         if py and (not self.args.ignore_py):
-            filter_pkg_specs = list(filter(lambda x: py in x.get("build"), pkg_specs))
+            filter_pkg_specs = list(filter(lambda x: py in x.get("build"), pkg_specs))  # type: ignore
             if len(filter_pkg_specs) > 0:
                 pkg_specs = list(filter_pkg_specs)
             else:
@@ -172,8 +176,8 @@ class DownloadPkg:
         if self.args.subdir:
             filter_pkg_specs = list(
                 filter(
-                    lambda x: self.args.subdir == x.get("subdir")
-                    or x.get("subdir") == "noarch",
+                    lambda x: self.args.subdir == x.get("subdir")  # type: ignore
+                    or x.get("subdir") == "noarch",  # type: ignore
                     pkg_specs,
                 )
             )
@@ -184,41 +188,53 @@ class DownloadPkg:
                     f"{Fore.YELLOW }>> No packages with {self.args.subdir} found{Style.RESET_ALL}"
                 )
 
-        if ver is None:
-            pkg_spec = pkg_specs[-1]  # the newest version
-        else:
-            if self.args.interact:
-                pkg_specs = [
-                    p for p in reversed(pkg_specs) if PV(p["version"]) == PV(ver)
-                ]
-                if len(pkg_specs) == 0:
-                    print(
-                        f"{Fore.RED}version {ver} of {self.pkg_name} "
-                        f"is not found in the db{Style.RESET_ALL}"
-                    )
-                    sys.exit(1)
-                urls = [
-                    f'{spec.get("timestamp")}-{spec.get("url")}' for spec in pkg_specs
-                ]
-                urls.sort()
-                choice = get_choice(
-                    "Please choose a package to download", urls, default=len(urls) - 1
-                )
-                return pkg_specs[choice]
-            pkg_spec = None
-            for p in reversed(pkg_specs):
-                if PV(p["version"]) <= PV(ver):
-                    pkg_spec = p
-                    break
-            if pkg_spec is None:
+        if self.args.interact and ver:
+            pkg_specs = [
+                p
+                for p in reversed(pkg_specs)
+                if PV(p["version"]) == PV(ver)  # type: ignore
+            ]
+            if len(pkg_specs) == 0:
                 print(
                     f"{Fore.RED}version {ver} of {self.pkg_name} "
                     f"is not found in the db{Style.RESET_ALL}"
                 )
                 sys.exit(1)
+        pkg_specs.sort(
+            key=lambda spec: f'{spec.get("timestamp")}-{spec.get("url")}'  # type: ignore
+        )
+        if self.args.interact:
+            urls = [
+                f'{spec.get("timestamp")}-{spec.get("url")}'  # type: ignore
+                for spec in pkg_specs  # type: ignore
+            ]
+            choice = get_choice(
+                "Please choose a package to download",
+                urls,
+                default=len(urls) - 1,
+            )
+            if choice == -1:
+                sys.exit(0)
+            return pkg_specs[choice]
+
+        if ver is None:
+            pkg_spec = pkg_specs[-1]  # the newest version
+            return pkg_spec
+
+        pkg_spec = None
+        for p in reversed(pkg_specs):
+            if PV(p["version"]) <= PV(ver):  # type: ignore
+                pkg_spec = p
+                break
+        if pkg_spec is None:
+            print(
+                f"{Fore.RED}version {ver} of {self.pkg_name} "
+                f"is not found in the db{Style.RESET_ALL}"
+            )
+            sys.exit(1)
         return pkg_spec
 
-    def create_feedstock(self, pkg_spec: dict[str, Any]) -> list[str]:
+    def create_feedstock(self, pkg_spec: dict[str, Any]) -> list[str] | None:
         """创建 feestock"""
         pkg = pkg_spec.get("name")
         print(
@@ -295,23 +311,21 @@ class DownloadPkg:
             if isinstance(url, list):
                 fn = url_basename(url[0])
             else:
-                fn = url_basename(url)
-        fn = f"{pkg}-{fn}" if fn_is_simple(fn) else fn
+                fn = url_basename(url)  # type: ignore
+        fn = f"{pkg}-{fn}" if fn_is_simple(fn) else fn  # type: ignore
         url_spec.update({"fn": fn})
-        full_fn = os.path.join(out_dir, fn)
+        full_fn = os.path.join(out_dir, fn)  # type: ignore
 
         dl_urls = url
         if not isinstance(url, list):
             dl_urls = [url]
         dl_urls = [
-            urllib.parse.urljoin("https://github.moeyy.xyz/", u)
-            if "github" in u
-            else u
-            for u in dl_urls
+            urllib.parse.urljoin("https://github.moeyy.xyz/", u) if "github" in u else u  # type: ignore
+            for u in dl_urls  # type: ignore
         ]
 
         if os.path.exists(full_fn):
-            file_hash = hash_files([full_fn], url_spec.get("hash_type"))
+            file_hash = hash_files([full_fn], url_spec.get("hash_type"))  # type: ignore
             if file_hash == url_spec.get("hash"):
                 print(
                     f"{Fore.YELLOW}oo {fn} exists, skip downloading.{Style.RESET_ALL}"
@@ -322,7 +336,7 @@ class DownloadPkg:
         else:
             self.local_download(dl_urls, full_fn)
 
-    def local_download(self, dl_urls: list, fn: str) -> list[str]:
+    def local_download(self, dl_urls: list, fn: str) -> list[str] | None:
         """包装 download"""
         for url in dl_urls:
             res = self.download(url, fn)
@@ -441,11 +455,13 @@ class DownloadPkg:
                 )
                 continue
             url = item["url"]
+            hash_type, file_hash = None, None
             for ht in ["md5", "sha1", "sha256"]:
                 if ht in item:
                     hash_type = ht
                     break
-            file_hash = item[hash_type]
+            if hash_type is not None:
+                file_hash = item[hash_type]
             fn = item.get("fn", None)
             result.append(
                 {"url": url, "hash_type": hash_type, "hash": file_hash, "fn": fn}
@@ -517,6 +533,7 @@ class DownloadPkg:
     @staticmethod
     def get_new_url(block_content, url_specs):
         """得到新的 url 地址"""
+        change_line = ""
         if len(block_content) == 1:
             change_line = block_content[0]
         else:
@@ -525,19 +542,18 @@ class DownloadPkg:
                     change_line = line
                     break
                 continue
-
         if "{{" in change_line:
             if len(block_content) == 1:
                 m = url_p3.match(change_line)
             else:
                 m = url_p1.match(change_line)
-            new_url_pattern = re.escape(m.group(2)) + r".*" + re.escape(m.group(3))
+            new_url_pattern = re.escape(m.group(2)) + r".*" + re.escape(m.group(3))  # type: ignore
         else:
             if len(block_content) == 1:
                 m = url_p2.match(change_line)
             else:
                 m = url_p1.match(change_line)
-            new_url_pattern = re.escape(m.group(2))
+            new_url_pattern = re.escape(m.group(2))  # type: ignore
 
         new_url, match_url_spec = None, None
 

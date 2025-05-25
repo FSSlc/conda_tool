@@ -25,6 +25,7 @@ dependencies = [
     "pathspec>=0.12.1",
     "zstandard>=0.23.0",
     "rich>=13.9.2",
+    "msgpack>=1.1.0",
 ]
 license = { text = "MIT" }
 

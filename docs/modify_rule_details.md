@@ -5,6 +5,7 @@
 1. 向 conda 包添加我们自定义内容
 2. 将 conda 包中的文件移动到包的另一个位置
 3. 删除 conda 包中的有些文件或者目录
+4. 对 conda 包中的某些文件做 strip 操作，压缩体积
 
 为此开发了 conda 包修改工具来满足上面的需求。
 
@@ -28,12 +29,13 @@
       "bin/conda": "bin/_conda",
       "etc/fish": "share/"
     },
-    "delete": ["etc/fish", "xonsh"]
+    "delete": ["etc/fish", "xonsh"],
+    "strip": ["*.a", "*.so.*", "bin/*"]
   }
 }
 ```
 
-下面具体介绍三类操作的具体写法。
+下面具体介绍四类操作的具体写法。
 
 ### add 操作
 
@@ -54,4 +56,12 @@ mv 操作对应的路径都是相对 conda 包的路径，即操作的对象都�
 ### delete 操作
 
 delete 操作后面对应的是需要删除包中的路径或目录。
+匹配规则类似 gitignore 中的规则，具体实现使用了 pathspec 包的实现。
+
+### strip 操作
+
+strip 操作后面对应的是需要压缩的包中的路径或目录。
+
+TODO: 具体的 strip 功能待完善。
+
 匹配规则类似 gitignore 中的规则，具体实现使用了 pathspec 包的实现。

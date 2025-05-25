@@ -6,3 +6,4 @@ packaging
 pathspec
 zstandard
 rich
+msgpack

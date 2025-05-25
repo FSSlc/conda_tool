@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 """Create a package database for newest packages from conda-forge channel"""
 
@@ -12,6 +12,8 @@ import urllib.request
 from collections import defaultdict
 from typing import Any
 
+import msgpack
+import zstandard
 from packaging.version import parse as PV
 
 try:
@@ -38,10 +40,12 @@ def load_repodata(arches: list[str], forge_url: str) -> dict[str, Any]:
                 data.update(repodata["packages.conda"])
         except urllib.error.HTTPError as e:
             print(f"Error, download '{url}' failed, details: '{str(e)}'")
-    if not os.path.exists(f"{SCRIPT_DIR}/data"):
-        os.makedirs(f"{SCRIPT_DIR}/data")
-    with open(f"{SCRIPT_DIR}/data/data.json", "w", encoding="utf8", newline="\n") as f:
-        json.dump(data, f, ensure_ascii=False)
+
+    os.makedirs(f"{SCRIPT_DIR}/data", exist_ok=True)
+    with open(f"{SCRIPT_DIR}/data/data.zstd", "wb") as f:
+        cctx = zstandard.ZstdCompressor()
+        compressed = cctx.compress(msgpack.dumps(data))  # type: ignore
+        f.write(compressed)
     return data
 
 
@@ -61,7 +65,7 @@ def parse_repodata(data: Any, out: str, forge_url: str) -> None:
                 "depends": deps,
                 "md5": p["md5"],
                 "build": p["build"],
-                "subdir": p['subdir'],
+                "subdir": p["subdir"],
                 "timestamp": p.get("timestamp", 0),
                 "url": f"{forge_url}/{p['subdir']}/{pn}",
             }
@@ -74,8 +78,10 @@ def parse_repodata(data: Any, out: str, forge_url: str) -> None:
                 v, key=lambda x: (x["version"], x["timestamp"], x["build"])
             )
     print(f"Writing package database to {out}")
-    with open(out, "w", encoding="utf8", newline="\n") as f:
-        json.dump(pkg_db, f, ensure_ascii=False)
+    with open(out, "wb") as f:
+        cctx = zstandard.ZstdCompressor()
+        compressed = cctx.compress(msgpack.dumps(pkg_db))  # type: ignore
+        f.write(compressed)
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-o",
         "--output",
-        default=f"{SCRIPT_DIR}/data/pkgdb.json",
+        default=f"{SCRIPT_DIR}/data/pkgdb.zstd",
         help="Output package databse file (default: '%(default)s')",
     )
     parser.add_argument(
@@ -140,10 +146,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """主要实现逻辑"""
     args = parse_args()
-    exist_data_fn = f"{SCRIPT_DIR}/data/data.json"
+    exist_data_fn = f"{SCRIPT_DIR}/data/data.zstd"
     if os.path.exists(exist_data_fn):
-        with open(exist_data_fn, encoding="utf8") as fin:
-            data = json.load(fin)
+        dctx = zstandard.ZstdDecompressor()
+        with open("data/data.zstd", "rb") as f:
+            data = msgpack.loads(dctx.decompress(f.read()))
     else:
         data = load_repodata(args.ARCHES, args.CONDA_FORGE_URL)
     parse_repodata(data, args.output, args.CONDA_FORGE_URL)

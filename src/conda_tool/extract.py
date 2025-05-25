@@ -171,10 +171,10 @@ class Extractor:
 
     def make_repo(self, conda_pkgs_dir, pkgs_output_dir):
         """按照 conda channel 形式组织 conda 包"""
+        preconda_dir = os.path.join(pkgs_output_dir, "preconda")
+        os.makedirs(preconda_dir, exist_ok=True)
         urls_txt = os.path.join(conda_pkgs_dir, "urls.txt")
         if not os.path.exists(urls_txt):
-            preconda_dir = os.path.join(pkgs_output_dir, "preconda")
-            os.makedirs(preconda_dir, exist_ok=True)
             shutil.unpack_archive(
                 os.path.join(pkgs_output_dir, "preconda.tar.bz2"), preconda_dir, "bztar"
             )

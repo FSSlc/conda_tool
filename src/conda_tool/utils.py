@@ -13,8 +13,6 @@ import textwrap
 from collections.abc import Sized
 
 import zstandard
-from rich.console import Console
-from rich.logging import RichHandler
 
 SCRIPT_DIR = os.getcwd()
 TEXT_WIDTH = 78
@@ -25,6 +23,9 @@ ZSTD_COMPRESS_THREADS = 1
 
 def setup_logging(terminal_width: int | None = None) -> None:
     """设置日志格式"""
+    from rich.console import Console
+    from rich.logging import RichHandler
+
     logger = logging.getLogger("conda_tool")
     console = Console(width=terminal_width) if terminal_width else None
     rich_handler = RichHandler(
@@ -61,16 +62,16 @@ def get_choice(message: str, choices: list[str], default: int = 0) -> int:
     max_choice = len(choices) - 1
     while True:
         choice = wrap_input(
-            f"Please choose {min_choice}-{max_choice} (default: [{default}]): "
+            f"Please choose {min_choice}-{max_choice} (default: [{default}], -1 for exit): "
         )
 
         if not choice:
             print(SEP_LINE)
             return default
-        if not re.match(r"\d+", choice):
+        if choice != "-1" and (not re.match(r"\d+", choice)):
             continue
         int_choice = int(choice)
-        if int_choice < 0 or int_choice >= len(choices):
+        if int_choice < -1 or int_choice >= len(choices):
             continue
         print(SEP_LINE)
         return int_choice
@@ -105,9 +106,6 @@ def get_filelist(prefix: str, with_prefix: bool = False) -> list[str]:
 
 def extract_zst(archive: str, out_path: str) -> None:
     """extract .zst file"""
-
-    if zstandard is None:
-        raise ImportError("pip install zstandard")
 
     archive = os.path.abspath(archive)
     out_path = os.path.abspath(out_path)

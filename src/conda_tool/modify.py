@@ -201,21 +201,18 @@ class Modify:
                 self.extract_pkg(pkg_info)
 
                 # 2. rule check and transfer rule paths
-                if "add" in rule:
-                    new_add_rules, errors = self.get_add_rule(
-                        rule, errors, pkg_name, pkg_info
-                    )
-                    rule["add"] = new_add_rules
-
-                if "mv" in rule:
-                    new_mv_rules, errors = self.get_mv_rule(
-                        rule, errors, pkg_name, pkg_info
-                    )
-                    rule["mv"] = new_mv_rules
-
-                if "delete" in rule:
-                    new_delete_files = self.get_delete_rule(rule, pkg_info)
-                    rule["delete"] = new_delete_files
+                for rule_type in ["add", "mv"]:
+                    if rule_type in rule:
+                        new_expand_rules, errors = self.expand_rule(
+                            rule, rule_type, errors, pkg_name, pkg_info
+                        )
+                        rule[rule_type] = new_expand_rules
+                for rule_type in ["delete", "strip"]:
+                    if rule_type in rule:
+                        new_expand_files = self.expand_pattern_rule(
+                            rule, rule_type, pkg_info
+                        )
+                        rule[rule_type] = new_expand_files
                 pkg_info.update({"rule": rule})
                 filter_pkgs_infos.append(pkg_info)
 
@@ -251,167 +248,95 @@ class Modify:
                 "zst",
             )
 
-    def get_add_rule(
+    def expand_rule(
         self,
         rule: dict[str, Any],
+        rule_type: str,
         errors: defaultdict[Any, list[str]],
         pkg_name: str,
         pkg_info: dict[str, Any],
     ) -> tuple[dict[str, Any], defaultdict[Any, list[str]]]:
-        """获取添加规则"""
-        expand_add_rules = {}
-        for k, v in rule["add"].items():
-            src_add_path = k
-            if not os.path.isabs(k):
-                src_add_path = os.path.abspath(
-                    os.path.normpath(os.path.join(self.config_path, k))
-                )
-            if os.path.isfile(src_add_path):
-                if not os.path.exists(src_add_path):
-                    errors[pkg_name].append(
-                        f"Error, rule add '{k}:{v}', {k} is not a valid exist path"
-                    )
-                else:
-                    if v.endswith("/"):
-                        new_path = os.path.join(
-                            pkg_info["binary_path"], v, os.path.basename(src_add_path)
-                        )
-                    else:
-                        new_path = os.path.join(pkg_info["binary_path"], v)
-                    expand_add_rules[src_add_path] = new_path
-            elif os.path.isdir(src_add_path):
-                if not os.path.exists(src_add_path):
-                    msg = f"Error, rule add '{k}:{v}', {k} is not a valid exist path"
-                    errors[pkg_name].append(msg)
-                else:
-                    if not v.endswith("/"):
-                        msg = (
-                            f"Error, rule add '{k}:{v}', {k} is a dir"
-                            " then {v} must endswith '/'"
-                        )
-                        errors[pkg_name].append(msg)
-                    else:
-                        # 如果是目录，则将该文件夹的所有文件及子目录复制到目标目录
-                        new_dir = os.path.join(pkg_info["binary_path"], v)
-                        file_lists = get_filelist(src_add_path, with_prefix=True)
-                        for file in file_lists:
-                            expand_add_rules[file] = os.path.join(
-                                new_dir,
-                                src_add_path.strip("/").split("/")[-1],
-                                os.path.relpath(file, start=src_add_path),
-                            )
+        """根据 rule_type 获取具体展开规则"""
+        expand_rules = {}
+        for k, v in rule[rule_type].items():
+            src_path = k
+            if rule_type == "add":
+                src_dir = os.path.dirname(self.config_path)
             else:
-                # 通配符
-                src_add_path_dirname = os.path.dirname(src_add_path)
-                if not os.path.exists(src_add_path_dirname):
-                    msg = f"Error, rule add '{k}:{v}', {k} is not a valid exist path"
-                    errors[pkg_name].append(msg)
-                else:
-                    file_lists = self.get_spec_match_files(
-                        os.path.dirname(src_add_path),
-                        pathspec.PathSpec.from_lines(
-                            pathspec.patterns.GitWildMatchPattern, [src_add_path]
-                        ),
-                    )
-                    if len(file_lists) > 0:
-                        if not v.endswith("/"):
-                            msg = f"Error, rule add '{k}:{v}', {v} must endswith '/'"
-                            errors[pkg_name].append(msg)
-                        else:
-                            new_dir = os.path.join(pkg_info["binary_path"], v)
-                            for file in file_lists:
-                                expand_add_rules[file] = os.path.join(
-                                    new_dir,
-                                    os.path.relpath(file, start=src_add_path_dirname),
-                                )
-        return expand_add_rules, errors
-
-    def get_mv_rule(
-        self,
-        rule: dict[str, Any],
-        errors: defaultdict[Any, list[str]],
-        pkg_name: str,
-        pkg_info: dict[str, Any],
-    ) -> tuple[dict[str, Any], defaultdict[Any, list[str]]]:
-        """获取移动规则"""
-        expand_mv_rules = {}
-        for k, v in rule["mv"].items():
-            src_mv_path = k
+                src_dir = pkg_info["binary_path"]
             if not os.path.isabs(k):
-                src_mv_path = os.path.abspath(
-                    os.path.normpath(os.path.join(pkg_info["binary_path"], k))
-                )
-            if os.path.isfile(src_mv_path):
-                if not os.path.exists(src_mv_path):
-                    msg = f"Error, rule mv '{k}:{v}', {k} is not a valid exist path"
+                src_path = os.path.abspath(os.path.normpath(os.path.join(src_dir, k)))
+            if os.path.isfile(src_path):
+                if not os.path.exists(src_path):
+                    msg = f"Error, rule {rule_type} '{k}:{v}', {k} is not a valid exist path"
                     errors[pkg_name].append(msg)
                 else:
                     if v.endswith("/"):
                         new_path = os.path.join(
-                            pkg_info["binary_path"], v, os.path.basename(src_mv_path)
+                            pkg_info["binary_path"], v, os.path.basename(src_path)
                         )
                     else:
                         new_path = os.path.join(pkg_info["binary_path"], v)
-                    expand_mv_rules[src_mv_path] = new_path
-            elif os.path.isdir(src_mv_path):
-                if not os.path.exists(src_mv_path):
-                    msg = f"Error, rule mv '{k}:{v}', {k} is not a valid exist path"
+                    expand_rules[src_path] = new_path
+            elif os.path.isdir(src_path):
+                if not os.path.exists(src_path):
+                    msg = f"Error, rule {rule_type} '{k}:{v}', {k} is not a valid exist path"
                     errors[pkg_name].append(msg)
                 else:
                     if not v.endswith("/"):
                         msg = (
-                            f"Error, rule mv '{k}:{v}', {k} is a dir"
+                            f"Error, rule {rule_type} '{k}:{v}', {k} is a dir"
                             " then {v} must endswith '/'"
                         )
                         errors[pkg_name].append(msg)
                     else:
                         # 如果是目录，则将目录放到目标目录下
                         new_dir = os.path.join(pkg_info["binary_path"], v)
-                        file_lists = get_filelist(src_mv_path, with_prefix=True)
+                        file_lists = get_filelist(src_path, with_prefix=True)
                         for file in file_lists:
-                            expand_mv_rules[file] = os.path.join(
+                            expand_rules[file] = os.path.join(
                                 new_dir,
-                                src_mv_path.strip("/").split("/")[-1],
-                                os.path.relpath(file, start=src_mv_path),
+                                src_path.strip("/").split("/")[-1],
+                                os.path.relpath(file, start=src_path),
                             )
             else:
                 # 通配符
-                src_mv_path_dirname = os.path.dirname(src_mv_path)
-                if not os.path.exists(src_mv_path_dirname):
-                    msg = f"Error, rule add '{k}:{v}', {k} is not a valid exist path"
+                src_path_dirname = os.path.dirname(src_path)
+                if not os.path.exists(src_path_dirname):
+                    msg = f"Error, rule {rule_type} '{k}:{v}', {k} is not a valid exist path"
                     errors[pkg_name].append(msg)
                 else:
                     file_lists = self.get_spec_match_files(
-                        os.path.dirname(src_mv_path),
+                        os.path.dirname(src_path),
                         pathspec.PathSpec.from_lines(
-                            pathspec.patterns.GitWildMatchPattern, [src_mv_path]
+                            pathspec.patterns.gitwildmatch.GitWildMatchPattern, [src_path]
                         ),
                     )
                     if len(file_lists) > 0:
                         if not v.endswith("/"):
-                            msg = f"Error, rule add '{k}:{v}', {v} must endswith '/'"
+                            msg = f"Error, rule {rule_type} '{k}:{v}', {v} must endswith '/'"
                             errors[pkg_name].append(msg)
                         else:
                             new_dir = os.path.join(pkg_info["binary_path"], v)
                             for file in file_lists:
-                                expand_mv_rules[file] = os.path.join(
+                                expand_rules[file] = os.path.join(
                                     new_dir,
-                                    os.path.relpath(file, start=src_mv_path_dirname),
+                                    os.path.relpath(file, start=src_path_dirname),
                                 )
-        return expand_mv_rules, errors
+        return expand_rules, errors
 
-    def get_delete_rule(
-        self, rule: dict[str, Any], pkg_info: dict[str, Any]
+    def expand_pattern_rule(
+        self, rule: dict[str, Any], rule_type: str, pkg_info: dict[str, Any]
     ) -> list[str]:
-        """转换删除规则"""
-        delete_rules = rule["delete"]
-        delete_spec = pathspec.PathSpec.from_lines(
-            pathspec.patterns.GitWildMatchPattern, delete_rules
+        """转换匹配规则，用于 delete strip 规则"""
+        rules = rule[rule_type]
+        spec = pathspec.PathSpec.from_lines(
+            pathspec.patterns.gitwildmatch.GitWildMatchPattern, rules
         )
-        delete_files = self.get_spec_match_files(
-            pkg_info["binary_path"], delete_spec, use_relateive=True
+        files = self.get_spec_match_files(
+            pkg_info["binary_path"], spec, use_relateive=True
         )
-        return delete_files
+        return files
 
     @staticmethod
     def get_spec_match_files(
@@ -445,6 +370,10 @@ class Modify:
             logger.info("  开始处理 delete 规则")
             self.handle_delete_rule(pkg_info)
             logger.info("  处理 delete 规则完毕")
+        if "strip" in rule:
+            logger.info("  开始处理 strip 规则")
+            self.handle_strip_rule(pkg_info)
+            logger.info("  处理 strip 规则完毕")
 
         # 最后根据 paths.json 内容修改 files, has_prefix 文件
         _, paths_json_data = self.get_paths_json_data(pkg_info)
@@ -517,13 +446,14 @@ class Modify:
                     # only one stream_writer() per compressor() must be in use at a time
                     with (
                         compressor().stream_writer(
-                            component_file, size=sizer.fileobj.size, closefd=False
+                            component_file, size=sizer.fileobj.size, closefd=False # type: ignore
                         ) as component_stream,
                         tarfile.TarFile(
                             fileobj=component_stream, mode="w"
                         ) as component_tar,
                     ):
                         for file in files:
+                            arcname = ""
                             if "pkg" in component:
                                 arcname = os.path.relpath(file, pkg_info["binary_path"])
                             if "info" in component:
@@ -622,13 +552,41 @@ class Modify:
                 to_remove_dir = os.path.dirname(to_remove_dir)
 
             # 修改 paths.json 文件
-            delete_rel_path = (os.path.relpath(delete_path, pkg_info["binary_path"]),)
+            delete_rel_path = os.path.relpath(delete_path, pkg_info["binary_path"])
             paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
             new_paths_info = list(
                 filter(
                     lambda x: x.get("_path") != delete_rel_path,
                     paths_json_data["paths"],
                 )
+            )
+            paths_json_data["paths"] = new_paths_info
+            paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
+            with open(paths_json_path, "w", encoding="utf-8") as fout:
+                fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
+
+    def handle_strip_rule(self, pkg_info: dict[str, Any]) -> None:
+        """执行压缩操作"""
+        strip_rule = pkg_info["rule"]["strip"]
+        for strip_path in strip_rule:
+            strip_abs_path = os.path.join(pkg_info["binary_path"], strip_path)
+            # todo: strip file
+            print("strip", strip_abs_path)
+            # 修改 paths.json 文件
+            strip_rel_path = os.path.relpath(strip_path, pkg_info["binary_path"])
+            paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
+            new_paths_info = list(
+                filter(
+                    lambda x: x.get("_path") == strip_rel_path,
+                    paths_json_data["paths"],
+                )
+            )[0]
+            # 大小和 sha256 需要更新
+            new_paths_info.update(
+                {
+                    "sha256": hash_files([strip_abs_path]),
+                    "size_in_bytes": os.path.getsize(strip_abs_path),
+                }
             )
             paths_json_data["paths"] = new_paths_info
             paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
