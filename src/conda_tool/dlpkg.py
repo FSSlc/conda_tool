@@ -512,6 +512,7 @@ class DownloadPkg:
                 fn = os.path.basename(urllib.parse.urlparse(new_url).path)
                 if match_url_spec.get("fn") is not None:
                     fn = match_url_spec.get("fn")
+                fn = f"{self.args.PKGNAME}-{fn}" if fn_is_simple(fn) else fn  # type: ignore
                 pkg_path = os.path.join(self.pkgs_dir, fn)
                 pkg_path = os.path.relpath(pkg_path, os.path.dirname(meta_yaml_tpl))
                 if len(block_content) == 1:
