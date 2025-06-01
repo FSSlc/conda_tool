@@ -30,7 +30,13 @@ try:
         setup_logging,
     )
 except ImportError:
-    from utils import SCRIPT_DIR, extract_archive, get_choice, hash_files, setup_logging
+    from conda_tool.utils import (
+        SCRIPT_DIR,
+        extract_archive,
+        get_choice,
+        hash_files,
+        setup_logging,
+    )
 
 
 setup_logging(120)
@@ -92,8 +98,8 @@ def parse_args() -> argparse.Namespace:
         help="allow user choose which version to be download",
     )
     parser.add_argument(
-        "--db",
-        default=f"{os.path.join(SCRIPT_DIR, 'data', 'pkgdb.zstd')}",
+        "--specs_dir",
+        default=f"{os.path.join(SCRIPT_DIR, 'data', 'packages')}",
         help="Package database file (default: %(default)s)",
     )
     parser.add_argument(
@@ -116,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
 
-    args.db = get_abs_path(args.db)
+    args.specs_dir = get_abs_path(args.specs_dir)
     args.workdir = get_abs_path(args.workdir)
     args.pkgs_dir = get_abs_path(args.pkgs_dir)
     args.recipes_dir = get_abs_path(args.recipes_dir)
@@ -152,17 +158,18 @@ class DownloadPkg:
         py = self.args.py
         ver = self.args.upper_bound
 
-        pkg_db_data = {}
-        dctx = zstandard.ZstdDecompressor()
-        with open(self.args.db, "rb") as f:
-            pkg_db_data = msgpack.loads(dctx.decompress(f.read()))
-        if self.pkg_name not in pkg_db_data:
+        spec_file = os.path.join(self.args.specs_dir, f"{self.pkg_name}.zstd")
+        if not os.path.exists(spec_file):
             print(
                 f"{Fore.RED}oo Requested package {self.pkg_name}"
                 + f" is not in database{Style.RESET_ALL}"
             )
             sys.exit(1)
-        pkg_specs = list(pkg_db_data[self.pkg_name])  # type: ignore
+
+        pkg_specs: list[dict] = []
+        dctx = zstandard.ZstdDecompressor()
+        with open(spec_file, "rb") as f:
+            pkg_specs = msgpack.loads(dctx.decompress(f.read()))  # type: ignore
 
         if py and (not self.args.ignore_py):
             filter_pkg_specs = list(filter(lambda x: py in x.get("build"), pkg_specs))  # type: ignore

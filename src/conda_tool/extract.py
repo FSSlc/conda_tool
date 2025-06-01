@@ -11,7 +11,7 @@ from logging import getLogger
 try:
     from .utils import SCRIPT_DIR, extract_large_tar, setup_logging
 except ImportError:
-    from utils import SCRIPT_DIR, extract_large_tar, setup_logging
+    from conda_tool.utils import SCRIPT_DIR, extract_large_tar, setup_logging
 
 
 setup_logging(120)

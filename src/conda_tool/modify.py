@@ -28,7 +28,7 @@ try:
         tmp_chdir,
     )
 except ImportError:
-    from utils import (
+    from conda_tool.utils import (
         SCRIPT_DIR,
         NullWriter,
         anonymize_tarinfo,
@@ -309,7 +309,8 @@ class Modify:
                     file_lists = self.get_spec_match_files(
                         os.path.dirname(src_path),
                         pathspec.PathSpec.from_lines(
-                            pathspec.patterns.gitwildmatch.GitWildMatchPattern, [src_path]
+                            pathspec.patterns.gitwildmatch.GitWildMatchPattern,
+                            [src_path],
                         ),
                     )
                     if len(file_lists) > 0:
@@ -446,7 +447,9 @@ class Modify:
                     # only one stream_writer() per compressor() must be in use at a time
                     with (
                         compressor().stream_writer(
-                            component_file, size=sizer.fileobj.size, closefd=False # type: ignore
+                            component_file,
+                            size=sizer.fileobj.size,  # type: ignore
+                            closefd=False,
                         ) as component_stream,
                         tarfile.TarFile(
                             fileobj=component_stream, mode="w"
