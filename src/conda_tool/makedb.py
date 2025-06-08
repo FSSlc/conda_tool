@@ -117,34 +117,61 @@ async def save_single_package(package_name: str, package_data: list[dict]) -> No
     file_path = f"{package_dir}/{package_name}.zstd"
 
     try:
-        sorted(package_data, key=lambda x: PV(x["version"]))
+        # 优化内存使用：立即处理排序而不保存中间结果
+        package_data = sorted(
+            package_data,
+            key=lambda x: (PV(x["version"]), x["timestamp"], x["build"]),
+            reverse=True,
+        )
     except Exception:
-        sorted(package_data, key=lambda x: (x["version"], x["timestamp"], x["build"]))
+        package_data = sorted(
+            package_data,
+            key=lambda x: (x["version"], x["timestamp"], x["build"]),
+            reverse=True,
+        )
+
     try:
+        # 使用上下文管理器确保文件正确关闭
+        cctx = zstandard.ZstdCompressor()
+        compressed = cctx.compress(msgpack.dumps(package_data))  # type: ignore
+
         async with aiofiles.open(file_path, "wb") as f:
-            cctx = zstandard.ZstdCompressor()
-            compressed = cctx.compress(msgpack.dumps(package_data))  # type: ignore
             await f.write(compressed)
     except OSError as e:
         print(f"Error saving package {package_name}: {str(e)}", file=sys.stderr)
 
 
-async def parse_repodata(data: dict[str, Any], forge_url: str) -> None:
+async def parse_repodata(
+    data: dict[str, Any],
+    forge_url: str,
+    semaphore: asyncio.Semaphore,
+    file_semaphore: asyncio.Semaphore,
+) -> None:
     """异步转换 repodata 数据"""
     print("Extracting package database ...")
     pkg_db = defaultdict(list)
 
     # 并行处理包数据
-    print("Extracting package database ...")
+    print("Processing packages ...")
     tasks = []
-    for pn, p in data.items():
-        tasks.append(process_package(pkg_db, pn, p, forge_url))
-    await asyncio.gather(*tasks)
+    async with semaphore:
+        for pn, p in data.items():
+            tasks.append(process_package(pkg_db, pn, p, forge_url))
+        await asyncio.gather(*tasks)
 
-    tasks = []
-    for package_name, package_data in pkg_db.items():
-        tasks.append(save_single_package(package_name, package_data))
-    await asyncio.gather(*tasks)
+    # 分批保存包数据以避免打开太多文件
+    batch_size = 100  # 每批处理 100 个包
+    package_items = list(pkg_db.items())
+    for i in range(0, len(package_items), batch_size):
+        batch = package_items[i : i + batch_size]
+        tasks = []
+        async with file_semaphore:
+            for package_name, package_data in batch:
+                tasks.append(save_single_package(package_name, package_data))
+            await asyncio.gather(*tasks)
+        print(
+            f"Processed batch {i // batch_size + 1}/{(len(package_items) - 1) // batch_size + 1}"
+        )
 
 
 async def load_existing_data(arch: str) -> dict[str, Any]:
@@ -199,7 +226,7 @@ def parse_args() -> argparse.Namespace:
             "https://conda.anaconda.org/conda-forge",
             "https://mirrors.nju.edu.cn/anaconda/cloud/conda-forge",
         ],
-        default="https://mirrors.nju.edu.cn/anaconda/cloud/conda-forge",
+        default="https://conda.anaconda.org/conda-forge",
         help="Conda forge url (default: %(default)s",
     )
     parser.add_argument(
@@ -211,10 +238,16 @@ def parse_args() -> argparse.Namespace:
         help="Whether to force refresh repodata",
     )
     parser.add_argument(
-        "--max-concurrent",
+        "--max",
         type=int,
-        default=5,
+        default=100,
         help="Maximum concurrent downloads (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--file-max",
+        type=int,
+        default=50,
+        help="Maximum concurrent file operations (default: %(default)s)",
     )
     args = parser.parse_args()
     return args
@@ -242,7 +275,8 @@ async def async_main() -> None:
     """异步主逻辑"""
     args = parse_args()
     data = {}
-    semaphore = asyncio.Semaphore(args.max_concurrent)
+    semaphore = asyncio.Semaphore(args.max)
+    file_semaphore = asyncio.Semaphore(args.file_max)
 
     # 并行处理所有架构
     tasks = []
@@ -263,6 +297,8 @@ async def async_main() -> None:
         await parse_repodata(
             {k: v for d in data.values() for k, v in d.items()},  # 合并所有架构的数据
             args.CONDA_FORGE_URL,
+            semaphore,
+            file_semaphore,
         )
     else:
         print("No valid data to process", file=sys.stderr)
