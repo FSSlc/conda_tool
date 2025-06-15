@@ -3,12 +3,15 @@
 """Mofdify a conda package according to a rule file."""
 
 import argparse
+import concurrent.futures
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tarfile
+import threading
 from collections import defaultdict
 from logging import getLogger
 from typing import Any
@@ -52,6 +55,9 @@ except ImportError:
 setup_logging(120)
 
 CONDA_PACKAGE_FORMAT_VERSION = 2
+MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
+CHUNK_SIZE = 8192 * 8
+FILE_QUEUE_SIZE = 1000
 
 EXAMPLE_DATA = {
     "conda": {
@@ -94,12 +100,100 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+class FileProcessor:
+    """Handles concurrent file operations with memory efficiency"""
+
+    def __init__(self):
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        self.lock = threading.Lock()
+        self.file_queue = queue.Queue(maxsize=FILE_QUEUE_SIZE)
+
+    def process_files_concurrently(
+        self, file_pairs: list[tuple[str, str]], operation: str
+    ):
+        """Process files concurrently with the specified operation"""
+        futures = []
+        for src, dst in file_pairs:
+            futures.append(
+                self.executor.submit(self._process_file, src, dst, operation)
+            )
+
+        # Wait for all operations to complete
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"File operation failed: {str(e)}")
+
+    def _process_file(self, src: str, dst: str, operation: str):
+        """Process a single file with proper error handling"""
+        try:
+            if operation == "copy":
+                self._copy_file(src, dst)
+            elif operation == "move":
+                self._move_file(src, dst)
+            elif operation == "delete":
+                self._delete_file(src)
+            elif operation == "strip":
+                self._strip_file(src)
+        except Exception as e:
+            logger.error(f"Failed to {operation} {src}: {str(e)}")
+
+    def _copy_file(self, src: str, dst: str):
+        """Memory-efficient file copy"""
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(src, "rb") as f_src, open(dst, "wb") as f_dst:
+            while True:
+                chunk = f_src.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                f_dst.write(chunk)
+
+    def _move_file(self, src: str, dst: str):
+        """Move file with fallback to copy+delete"""
+        try:
+            shutil.move(src, dst)
+        except OSError:
+            # Cross-device move, fallback to copy+delete
+            self._copy_file(src, dst)
+            os.unlink(src)
+
+    def _delete_file(self, path: str):
+        """Delete file and empty parent directories"""
+        if os.path.exists(path):
+            os.unlink(path)
+            # Clean up empty directories
+            parent = os.path.dirname(path)
+            while parent and len(os.listdir(parent)) == 0:
+                os.rmdir(parent)
+                parent = os.path.dirname(parent)
+
+    def _strip_file(self, path: str):
+        """Strip file"""
+        is_elf = is_elf_file(path)
+        if not is_elf:
+            logger.warning("not a ELF file, ignore this file.")
+        try:
+            subprocess.run(
+                ["strip", "--strip-debug", path],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Strip failed for {path}: {e.stderr.decode()}")
+
+    def __del__(self):
+        self.executor.shutdown(wait=True)
+
+
 class Modify:
     """修改类的具体实现"""
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.pkg_path, self.config_path, self.config = "", "", {}
+        self.pkg_path, self.config_path = "", ""
+        self.config: dict[str, Any] = {}
+        self.file_processor = FileProcessor()
 
     def run(self) -> None:
         """具体实现逻辑"""
@@ -493,8 +587,9 @@ class Modify:
 
     def handle_add_rule(self, pkg_info: dict[str, Any]) -> None:
         """执行复制"""
-        new_data = []
         add_rule = pkg_info["rule"]["add"]
+        new_data, file_pairs = [], []
+
         for old_path, new_path in add_rule.items():
             if not os.path.exists(old_path):
                 logger.warning(f"Source file not found: {old_path}")
@@ -510,19 +605,28 @@ class Modify:
                 new_file_path = new_path
                 new_file_rel_path = os.path.relpath(new_path, pkg_info["binary_path"])
 
+            file_pairs.append((old_path, new_file_path))
+            new_data.append(
+                {
+                    "_path": new_file_rel_path,
+                    "path_type": "hardlink",
+                    "sha256": "",  # Will be updated after copy
+                    "size_in_bytes": 0,
+                }
+            )
+
+        # Process files concurrently
+        self.file_processor.process_files_concurrently(file_pairs, "copy")
+
+        # Update file metadata
+        for i, (_, new_file_path) in enumerate(file_pairs):
             try:
-                shutil.copy(old_path, new_file_path)
-                new_data.append(
-                    {
-                        "_path": new_file_rel_path,
-                        "path_type": "hardlink",
-                        "sha256": hash_files([new_file_path]),
-                        "size_in_bytes": os.path.getsize(new_file_path),
-                    }
-                )
+                new_data[i]["sha256"] = hash_files([new_file_path])
+                new_data[i]["size_in_bytes"] = os.path.getsize(new_file_path)
             except Exception as e:
-                logger.error(f"Failed to copy {old_path} to {new_file_path}: {str(e)}")
+                logger.error(f"Failed to update metadata for {new_file_path}: {str(e)}")
                 continue
+
         # 修改 paths.json 文件
         paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
         paths_json_data["paths"].extend(new_data)
@@ -533,6 +637,9 @@ class Modify:
     def handle_mv_rule(self, pkg_info: dict[str, Any]) -> None:
         """执行移动或改名"""
         mv_rule = pkg_info["rule"]["mv"]
+        file_pairs = []
+        path_updates = []
+
         for old_path, new_path in mv_rule.items():
             if new_path.endswith("/"):
                 os.makedirs(new_path, exist_ok=True)
@@ -544,16 +651,22 @@ class Modify:
                 os.makedirs(os.path.dirname(new_path), exist_ok=True)
                 new_file_path = new_path
                 new_file_rel_path = os.path.relpath(new_path, pkg_info["binary_path"])
-            shutil.move(old_path, new_file_path)
-            # 修改 paths.json 文件
+
+            file_pairs.append((old_path, new_file_path))
             old_rel_path = os.path.relpath(old_path, pkg_info["binary_path"])
-            paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
-            old_path_info = list(
-                filter(
-                    lambda x: x.get("_path") == old_rel_path, paths_json_data["paths"]
-                )
-            )[0]
-            old_path_info.update({"_path": new_file_rel_path})
+            path_updates.append((old_rel_path, new_file_rel_path))
+
+        # Process files concurrently
+        self.file_processor.process_files_concurrently(file_pairs, "move")
+
+        # Update paths.json
+        paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
+        for old_rel_path, new_rel_path in path_updates:
+            for item in paths_json_data["paths"]:
+                if item.get("_path") == old_rel_path:
+                    item["_path"] = new_rel_path
+                    break
+
             paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
             with open(paths_json_path, "w", encoding="utf-8") as fout:
                 fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
@@ -561,30 +674,31 @@ class Modify:
     def handle_delete_rule(self, pkg_info: dict[str, Any]) -> None:
         """执行删除操作"""
         delete_rule = pkg_info["rule"]["delete"]
-        for delete_path in delete_rule:
-            delete_abs_path = os.path.join(pkg_info["binary_path"], delete_path)
-            if os.path.exists(delete_abs_path):
-                os.unlink(delete_abs_path)
 
-            # 递归移除空目录
-            to_remove_dir = os.path.dirname(delete_abs_path)
-            while len(get_filelist(to_remove_dir)) == 0:
-                os.rmdir(to_remove_dir)
-                to_remove_dir = os.path.dirname(to_remove_dir)
+        files_to_delete = [
+            os.path.join(pkg_info["binary_path"], delete_path)
+            for delete_path in delete_rule
+        ]
 
-            # 修改 paths.json 文件
-            delete_rel_path = os.path.relpath(delete_path, pkg_info["binary_path"])
-            paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
-            new_paths_info = list(
-                filter(
-                    lambda x: x.get("_path") != delete_rel_path,
-                    paths_json_data["paths"],
-                )
-            )
-            paths_json_data["paths"] = new_paths_info
-            paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
-            with open(paths_json_path, "w", encoding="utf-8") as fout:
-                fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
+        # Process deletions concurrently
+        self.file_processor.process_files_concurrently(
+            [(f, "") for f in files_to_delete], "delete"
+        )
+        # Update paths.json
+        delete_rel_paths = [
+            os.path.relpath(delete_path, pkg_info["binary_path"])
+            for delete_path in delete_rule
+        ]
+
+        paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
+        paths_json_data["paths"] = [
+            item
+            for item in paths_json_data["paths"]
+            if item.get("_path") not in delete_rel_paths
+        ]
+        paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
+        with open(paths_json_path, "w", encoding="utf-8") as fout:
+            json.dump(paths_json_data, fout, indent=2, ensure_ascii=False)
 
     def handle_strip_rule(self, pkg_info: dict[str, Any]) -> None:
         """执行压缩操作"""
