@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tarfile
 from collections import defaultdict
@@ -13,7 +14,13 @@ from logging import getLogger
 from typing import Any
 from zipfile import ZIP_STORED, ZipFile
 
-import pathspec
+logger = getLogger(__name__)
+
+try:
+    import pathspec
+except ImportError:
+    logger.error("Error: 'pathspec' package is required. Please install it.")
+    sys.exit(1)
 
 try:
     from .utils import (
@@ -24,6 +31,7 @@ try:
         extract_archive,
         get_filelist,
         hash_files,
+        is_elf_file,
         setup_logging,
         tmp_chdir,
     )
@@ -36,12 +44,12 @@ except ImportError:
         extract_archive,
         get_filelist,
         hash_files,
+        is_elf_file,
         setup_logging,
         tmp_chdir,
     )
 
 setup_logging(120)
-logger = getLogger(__name__)
 
 CONDA_PACKAGE_FORMAT_VERSION = 2
 
@@ -165,7 +173,7 @@ class Modify:
         comps = basename_no_suffix.split("-")
         other, version, build_str = comps[:-2], comps[-2], comps[-1]
         name = "-".join(other)
-        fmt = "tar.bz2" if ".tar.bz2" in pkg_path else "conda"
+        pkg_fmt = "tar.bz2" if ".tar.bz2" in pkg_path else "conda"
         binary_path = (
             os.path.join(extract_path, "pkg") if ".conda" in pkg_path else extract_path
         )
@@ -179,7 +187,7 @@ class Modify:
             "name_no_suffix": basename_no_suffix,
             "version": version,
             "build_str": build_str,
-            "format": fmt,
+            "format": pkg_fmt,
             "extract_path": extract_path,
             "binary_path": binary_path,
             "info_path": info_path,
@@ -195,8 +203,7 @@ class Modify:
             if len(pkg_info) == 0:
                 msg = f"Error, no package named '{pkg_name}' found in '{self.pkg_path}'"
                 errors[pkg_name].append(msg)
-
-            if len(pkg_info) == 1:
+            elif len(pkg_info) == 1:
                 pkg_info = pkg_info[0]
                 self.extract_pkg(pkg_info)
 
@@ -215,6 +222,9 @@ class Modify:
                         rule[rule_type] = new_expand_files
                 pkg_info.update({"rule": rule})
                 filter_pkgs_infos.append(pkg_info)
+            else:
+                msg = f"Error, more than one package named '{pkg_name}' found in '{self.pkg_path}', not handle them."
+                errors[pkg_name].append(msg)
 
         if len(errors) > 0:
             for name, error in errors.items():
@@ -335,13 +345,13 @@ class Modify:
             pathspec.patterns.gitwildmatch.GitWildMatchPattern, rules
         )
         files = self.get_spec_match_files(
-            pkg_info["binary_path"], spec, use_relateive=True
+            pkg_info["binary_path"], spec, use_relative=True
         )
         return files
 
     @staticmethod
     def get_spec_match_files(
-        basedir: str, spec: pathspec.PathSpec, use_relateive: bool = False
+        basedir: str, spec: pathspec.PathSpec, use_relative: bool = False
     ) -> list[str]:
         """获取给定匹配规则的文件列表"""
         match_files = []
@@ -349,7 +359,7 @@ class Modify:
             for file in files:
                 file_path = os.path.join(root, file)
                 check_path = file_path
-                if use_relateive:
+                if use_relative:
                     check_path = os.path.relpath(file_path, start=basedir)
                 if spec.match_file(check_path):
                     match_files.append(file_path)
@@ -486,6 +496,9 @@ class Modify:
         new_data = []
         add_rule = pkg_info["rule"]["add"]
         for old_path, new_path in add_rule.items():
+            if not os.path.exists(old_path):
+                logger.warning(f"Source file not found: {old_path}")
+                continue
             if new_path.endswith("/"):
                 os.makedirs(new_path, exist_ok=True)
                 new_file_path = os.path.join(new_path, os.path.basename(old_path))
@@ -496,15 +509,20 @@ class Modify:
                 os.makedirs(os.path.dirname(new_path), exist_ok=True)
                 new_file_path = new_path
                 new_file_rel_path = os.path.relpath(new_path, pkg_info["binary_path"])
-            shutil.copy(old_path, new_file_path)
-            new_data.append(
-                {
-                    "_path": new_file_rel_path,
-                    "path_type": "hardlink",
-                    "sha256": hash_files([new_file_path]),
-                    "size_in_bytes": os.path.getsize(new_file_path),
-                }
-            )
+
+            try:
+                shutil.copy(old_path, new_file_path)
+                new_data.append(
+                    {
+                        "_path": new_file_rel_path,
+                        "path_type": "hardlink",
+                        "sha256": hash_files([new_file_path]),
+                        "size_in_bytes": os.path.getsize(new_file_path),
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Failed to copy {old_path} to {new_file_path}: {str(e)}")
+                continue
         # 修改 paths.json 文件
         paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
         paths_json_data["paths"].extend(new_data)
@@ -573,8 +591,18 @@ class Modify:
         strip_rule = pkg_info["rule"]["strip"]
         for strip_path in strip_rule:
             strip_abs_path = os.path.join(pkg_info["binary_path"], strip_path)
-            # todo: strip file
-            print("strip", strip_abs_path)
+            is_elf = is_elf_file(strip_abs_path)
+            if not is_elf:
+                logger.warning("not a ELF file, ignore this file.")
+                continue
+            try:
+                subprocess.run(
+                    ["strip", "--strip-debug", strip_abs_path],
+                    check=True,
+                    capture_output=True,
+                )
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Strip failed for {strip_abs_path}: {e.stderr.decode()}")
             # 修改 paths.json 文件
             strip_rel_path = os.path.relpath(strip_path, pkg_info["binary_path"])
             paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)

@@ -136,7 +136,20 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
         "xztar",
         "tar.zx",
     ]:
-        shutil.unpack_archive(archive, out_path)
+        if fmt.startswith("tar"):
+            # 自定义 tar 解压逻辑，处理符号链接
+            with tarfile.open(archive, "r:*") as tar:
+                for member in tar.getmembers():
+                    try:
+                        # 跳过可疑的符号链接
+                        if member.issym() and ".." in member.linkname:
+                            continue
+                        tar.extract(member, out_path, set_attrs=False)
+                    except OSError as e:
+                        print(f"Warning: Failed to extract {member.name}: {str(e)}")
+                        continue
+        else:
+            shutil.unpack_archive(archive, out_path)
     else:
         raise ValueError(f"Unknown format {fmt} to extract.")
 
@@ -155,7 +168,7 @@ def extract_large_tar(tar_path, extract_path, chunk_size=8192, debug=False):
                 try:
                     if debug:
                         print(
-                            f"进度：{index:03d}/{total_files:03d} ({(index/total_files)*100:06.2f}%)"
+                            f"进度：{index:03d}/{total_files:03d} ({(index / total_files) * 100:06.2f}%)"
                             + f" - {member.name}"
                         )
 
@@ -238,3 +251,14 @@ def compressor() -> zstandard.ZstdCompressor:
     return zstandard.ZstdCompressor(
         level=ZSTD_COMPRESS_LEVEL, threads=ZSTD_COMPRESS_THREADS
     )
+
+
+def is_elf_file(file_path: str) -> bool:
+    """通过读取文件头判断是否为 ELF 文件"""
+    try:
+        with open(file_path, "rb") as f:
+            # 读取前 4 个字节
+            header = f.read(4)
+            return header == b"\x7fELF"
+    except OSError:
+        return False
