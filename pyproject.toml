@@ -35,6 +35,7 @@ license = { text = "MIT" }
 Repository = "https://github.com/FSSlc/conda_tool"
 
 [project.scripts]
+ct = "conda_tool.__main__:main"
 ct_makedb = "conda_tool.makedb:main"
 ct_dlpkg = "conda_tool.dlpkg:main"
 ct_extract = "conda_tool.extract:main"

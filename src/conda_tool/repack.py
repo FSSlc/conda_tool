@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
 
     args.source = abs_path(args.source)
     args.config = abs_path(args.config)
+
+    if not args.output:
+        args.output = os.path.join(
+            os.path.dirname(args.source), "mod-" + os.path.basename(args.source)
+        )
     args.output = abs_path(args.output)
 
     if not os.path.isfile(args.source):
@@ -36,11 +41,6 @@ def parse_args() -> argparse.Namespace:
     if not os.path.isfile(args.config):
         logger.error(f"Config file not found: {args.config}")
         sys.exit(1)
-
-    if not args.output:
-        args.output = os.path.join(
-            os.path.dirname(args.source) + "mod-" + os.path.basename(args.source)
-        )
 
     if os.path.exists(args.output):
         logger.error(f"Output file already exists: {args.output}")
@@ -53,7 +53,10 @@ def extract_sh_package(source_sh: str, temp_dir: str) -> None:
     """Extract the sh package using extract.py"""
     import sys as sys_module
 
-    from extract import main as extract_main
+    try:
+        from .extract import main as extract_main
+    except ImportError:
+        from conda_tool.extract import main as extract_main
 
     original_argv = sys_module.argv
     try:
@@ -67,7 +70,10 @@ def modify_package_content(work_dir: str, config_path: str) -> None:
     """Modify the package content using modify.py"""
     import sys as sys_module
 
-    from modify import main as modify_main
+    try:
+        from .modify import main as modify_main
+    except ImportError:
+        from conda_tool.modify import main as modify_main
 
     original_argv = sys_module.argv
     try:
@@ -85,7 +91,11 @@ def modify_package_content(work_dir: str, config_path: str) -> None:
 
 def repack_sh_package(original_sh: str, work_dir: str, output_path: str) -> None:
     """Repack the modified package into a new sh file"""
-    from extract import parse_sh
+
+    try:
+        from .extract import parse_sh
+    except ImportError:
+        from conda_tool.extract import parse_sh
 
     sh_datas = parse_sh(original_sh, False)
     old_mode = sh_datas["old_mode"]
