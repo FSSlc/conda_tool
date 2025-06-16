@@ -24,6 +24,7 @@ from packaging.version import parse as PV
 try:
     from .utils import (
         SCRIPT_DIR,
+        abs_path,
         extract_archive,
         get_choice,
         hash_files,
@@ -32,6 +33,7 @@ try:
 except ImportError:
     from conda_tool.utils import (
         SCRIPT_DIR,
+        abs_path,
         extract_archive,
         get_choice,
         hash_files,
@@ -51,15 +53,6 @@ url_p3 = re.compile(r"(^\s*-?\s*url:\s*)([^{]+)\{\{.*\}\}([^}]+)$")
 def url_basename(url: str) -> str:
     """获取名称"""
     return os.path.basename(urllib.parse.urlparse(url).path)
-
-
-def get_abs_path(path: str) -> str:
-    """获取绝对路径"""
-    if not os.path.isabs(path):
-        script_dir = os.path.dirname(__file__)
-        path = os.path.join(script_dir, path)
-        path = os.path.abspath(path)
-    return path
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,10 +115,10 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
 
-    args.specs_dir = get_abs_path(args.specs_dir)
-    args.workdir = get_abs_path(args.workdir)
-    args.pkgs_dir = get_abs_path(args.pkgs_dir)
-    args.recipes_dir = get_abs_path(args.recipes_dir)
+    args.specs_dir = abs_path(args.specs_dir)
+    args.workdir = abs_path(args.workdir)
+    args.pkgs_dir = abs_path(args.pkgs_dir)
+    args.recipes_dir = abs_path(args.recipes_dir)
     return args
 
 
@@ -177,7 +170,7 @@ class DownloadPkg:
                 pkg_specs = list(filter_pkg_specs)
             else:
                 print(
-                    f"{Fore.YELLOW }>> No packages with {py} build string{Style.RESET_ALL}"
+                    f"{Fore.YELLOW}>> No packages with {py} build string{Style.RESET_ALL}"
                 )
 
         if self.args.subdir:
@@ -192,7 +185,7 @@ class DownloadPkg:
                 pkg_specs = list(filter_pkg_specs)
             else:
                 print(
-                    f"{Fore.YELLOW }>> No packages with {self.args.subdir} found{Style.RESET_ALL}"
+                    f"{Fore.YELLOW}>> No packages with {self.args.subdir} found{Style.RESET_ALL}"
                 )
 
         if self.args.interact and ver:
@@ -208,11 +201,11 @@ class DownloadPkg:
                 )
                 sys.exit(1)
         pkg_specs.sort(
-            key=lambda spec: f'{spec.get("timestamp")}-{spec.get("url")}'  # type: ignore
+            key=lambda spec: f"{spec.get('timestamp')}-{spec.get('url')}"  # type: ignore
         )
         if self.args.interact:
             urls = [
-                f'{spec.get("timestamp")}-{spec.get("url")}'  # type: ignore
+                f"{spec.get('timestamp')}-{spec.get('url')}"  # type: ignore
                 for spec in pkg_specs  # type: ignore
             ]
             choice = get_choice(

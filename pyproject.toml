@@ -39,6 +39,7 @@ ct_makedb = "conda_tool.makedb:main"
 ct_dlpkg = "conda_tool.dlpkg:main"
 ct_extract = "conda_tool.extract:main"
 ct_modify = "conda_tool.modify:main"
+ct_repack = "conda_tool.repack:main"
 
 [build-system]
 requires = ["pdm-backend"]
@@ -52,13 +53,8 @@ version = { source = "file", path = "src/conda_tool/__init__.py" }
 source-includes = ["tests/", "scripts/"]
 
 [tool.pdm.dev-dependencies]
-lint = [
-    "pylint>=3.3.7",
-    "ruff>=0.11.12",
-]
-dev = [
-    "ipython>=8.37.0",
-]
+lint = ["pylint>=3.3.7", "ruff>=0.11.12"]
+dev = ["ipython>=8.37.0"]
 
 [tool.ruff.lint]
 select = [

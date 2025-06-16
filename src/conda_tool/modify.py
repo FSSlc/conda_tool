@@ -27,8 +27,8 @@ except ImportError:
 
 try:
     from .utils import (
-        SCRIPT_DIR,
         NullWriter,
+        abs_path,
         anonymize_tarinfo,
         compressor,
         extract_archive,
@@ -40,8 +40,8 @@ try:
     )
 except ImportError:
     from conda_tool.utils import (
-        SCRIPT_DIR,
         NullWriter,
+        abs_path,
         anonymize_tarinfo,
         compressor,
         extract_archive,
@@ -220,9 +220,7 @@ class Modify:
         """检验输入参数"""
         # 获取参数值
         logger.info("开始检查传入参数")
-        config_path = self.args.config_path
-        if not os.path.isabs(config_path):
-            config_path = os.path.abspath(os.path.join(SCRIPT_DIR, config_path))
+        config_path = abs_path(self.args.config_path)
         # 检查源文件是否存在
         if not os.path.isfile(config_path):
             logger.error(f"错误：配置文件 '{config_path}' 不存在")
@@ -231,9 +229,7 @@ class Modify:
         self.config_path = config_path
         logger.debug(f"配置文件路径 {config_path}")
 
-        pkg_path = self.args.pkg_path
-        if not os.path.isabs(pkg_path):
-            pkg_path = os.path.abspath(os.path.join(SCRIPT_DIR, pkg_path))
+        pkg_path = abs_path(self.args.pkg_path)
         if not os.path.exists(pkg_path):
             logger.error(f"错误：conda 包路径或目录 {pkg_path}' 不存在")
             logger.info("检查传入参数完毕")

@@ -262,3 +262,11 @@ def is_elf_file(file_path: str) -> bool:
             return header == b"\x7fELF"
     except OSError:
         return False
+
+
+def abs_path(file_path: str) -> str:
+    if not os.path.isabs(file_path):
+        file_path = os.path.abspath(os.path.join(SCRIPT_DIR, file_path))
+    return file_path
+
+

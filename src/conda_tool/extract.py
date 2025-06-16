@@ -7,11 +7,12 @@ import os
 import shutil
 import sys
 from logging import getLogger
+from typing import Any
 
 try:
-    from .utils import SCRIPT_DIR, extract_large_tar, setup_logging
+    from .utils import SCRIPT_DIR, abs_path, extract_large_tar, setup_logging
 except ImportError:
-    from conda_tool.utils import SCRIPT_DIR, extract_large_tar, setup_logging
+    from conda_tool.utils import SCRIPT_DIR, abs_path, extract_large_tar, setup_logging
 
 
 setup_logging(120)
@@ -54,14 +55,10 @@ def parse_args() -> argparse.Namespace:
 
     # 获取参数值
     source_path = args.source
-    if not os.path.isabs(source_path):
-        source_path = os.path.abspath(os.path.join(SCRIPT_DIR, source_path))
-    args.source = source_path
+    args.source = abs_path(source_path)
 
     output_dir = args.output
-    if not os.path.isabs(output_dir):
-        output_dir = os.path.abspath(os.path.join(SCRIPT_DIR, output_dir))
-    args.output = output_dir
+    args.output = abs_path(output_dir)
 
     # 检查源文件是否存在
     if not os.path.isfile(source_path):
@@ -80,6 +77,62 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def parse_sh(source_path: str, output_msg: bool = True) -> dict[str, Any]:
+    """读取 sh 获取必要信息"""
+    if output_msg:
+        logger.info("解析 sh 文件信息")
+    return_data = {
+        "name": b"",
+        "version": b"",
+        "platform": b"",
+        "bytes": b"",
+        "lines": b"",
+        "md5": b"",
+        "old_mode": True,
+        "script_data": b"",
+        "conda_exec_data": b"",
+        "pkgs_data": b"",
+    }
+    offset0, offset1, offset2 = 0, 0, 0
+    with open(source_path, "rb") as fin:
+        while True:
+            line = fin.readline()
+            if b"NAME:" in line:
+                return_data["name"] = line.strip().replace(b"# NAME:  ", b"")
+            if b"VER:" in line:
+                return_data["version"] = line.strip().replace(b"# VER:   ", b"")
+            if b"PLAT:" in line:
+                return_data["platform"] = line.strip().replace(b"# PLAT:  ", b"")
+            if b"BYTES:" in line:
+                return_data["bytes"] = line.strip().replace(b"# BYTES: ", b"")
+                return_data["old_mode"] = True
+            if b"LINES:" in line:
+                return_data["lines"] = line.strip().replace(b"# LINES: ", b"")
+                return_data["old_mode"] = True
+            if b"MD5:" in line:
+                return_data["md5"] = line.strip().replace(b"# MD5:   ", b"")
+
+            if b"boundary1=" in line:
+                offset1 = int(line.split()[-2])
+            if b"boundary2=" in line:
+                offset2 = int(line.split()[-2])
+            if b"@@END_HEADER@@" == line.strip():
+                offset0 = fin.tell()
+                fin.seek(0)
+                return_data["script_data"] = fin.read(offset0)
+                break
+
+        if return_data["old_mode"]:
+            return_data["pkgs_data"] = fin.read()
+        else:
+            fin.seek(offset0)
+            return_data["conda_exec_data"] = fin.read(offset1)
+            return_data["pkgs_data"] = fin.read(offset2)
+    if output_msg:
+        logger.info("解析 sh 文件信息完毕")
+    return return_data
+
+
 class Extractor:
     """解压 conda constructor sh 包"""
 
@@ -93,41 +146,17 @@ class Extractor:
         """执行具体的解压操作"""
         pkgs_dir = os.path.join(self.output_dir, "workdir/pkgs")
         os.makedirs(pkgs_dir, exist_ok=True)
-        old_mode, script_data, conda_exec_data, pkgs_data = self.parse_sh()
+
+        sh_datas = parse_sh(self.source_path)
+        old_mode = sh_datas["old_mode"]
+        script_data = sh_datas["script_data"]
+        conda_exec_data = sh_datas["conda_exec_data"]
+        pkgs_data = sh_datas["pkgs_data"]
+
         self.extract_script(script_data)
         self.extract_conda_exec(old_mode, conda_exec_data)
         self.extract_payload(pkgs_data)
         self.extract_tar()
-
-    def parse_sh(self) -> tuple[bool, bytes, bytes, bytes]:
-        """读取 sh 获取必要信息"""
-        logger.info("解析 sh 文件信息")
-        old_mode = False
-        script_data, conda_exec_data, pkgs_data = b"", b"", b""
-        offset0, offset1, offset2 = 0, 0, 0
-        with open(self.source_path, "rb") as fin:
-            while True:
-                line = fin.readline()
-                if b"LINES" in line:
-                    old_mode = True
-                if b"boundary1=" in line:
-                    offset1 = int(line.split()[-2])
-                if b"boundary2=" in line:
-                    offset2 = int(line.split()[-2])
-                if b"@@END_HEADER@@" == line.strip():
-                    offset0 = fin.tell()
-                    fin.seek(0)
-                    script_data = fin.read(offset0)
-                    break
-
-            if old_mode:
-                pkgs_data = fin.read()
-            else:
-                fin.seek(offset0)
-                conda_exec_data = fin.read(offset1)
-                pkgs_data = fin.read(offset2)
-        logger.info("解析 sh 文件信息完毕")
-        return old_mode, script_data, conda_exec_data, pkgs_data
 
     def extract_script(self, script_data):
         """输出 sh 文件脚本内容"""
