@@ -43,19 +43,18 @@ ct_modify = "conda_tool.modify:main"
 ct_repack = "conda_tool.repack:main"
 
 [build-system]
-requires = ["pdm-backend"]
-build-backend = "pdm.backend"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.pdm]
-distribution = true
-version = { source = "file", path = "src/conda_tool/__init__.py" }
+[tool.hatch.version]
+path = "src/conda_tool/__init__.py"
 
-[tool.pdm.build]
-source-includes = ["tests/", "scripts/"]
-
-[tool.pdm.dev-dependencies]
-lint = ["pylint>=3.3.7", "ruff>=0.11.12"]
-dev = ["ipython>=8.37.0"]
+[dependency-groups]
+dev = [
+    "pylint>=3.3.7",
+    "ruff>=0.11.12",
+    "ipython>=8.37.0",
+]
 
 [tool.ruff.lint]
 select = [
