@@ -88,7 +88,7 @@ def parse_sh(source_path: str, output_msg: bool = True) -> dict[str, Any]:
         "bytes": b"",
         "lines": b"",
         "md5": b"",
-        "old_mode": True,
+        "old_mode": False,
         "script_data": b"",
         "conda_exec_data": b"",
         "pkgs_data": b"",
