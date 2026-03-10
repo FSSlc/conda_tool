@@ -13,7 +13,8 @@ import urllib.request
 from concurrent.futures.process import ProcessPoolExecutor
 from logging import getLogger
 from multiprocessing import Manager
-from typing import Any
+from re import Match
+from typing import Literal, TypedDict, cast
 
 import msgpack
 import ruamel.yaml
@@ -48,6 +49,32 @@ fn_is_simple = re.compile(r"^v?\d+([\-.]\d+)+(\.\w+)+$").match
 url_p1 = re.compile(r"(^\s*-\s*)(.*)$")
 url_p2 = re.compile(r"(^\s*-?\s*url:\s*)(.*)$")
 url_p3 = re.compile(r"(^\s*-?\s*url:\s*)([^{]+)\{\{.*\}\}([^}]+)$")
+
+HashType = Literal["md5", "sha1", "sha256"]
+PackageUrl = str | list[str]
+
+
+class PackageSpec(TypedDict):
+    name: str
+    version: str
+    nv: str
+    md5: str
+    build: str
+    subdir: str
+    url: str
+    timestamp: int
+
+
+class SourceUrlSpec(TypedDict):
+    url: PackageUrl
+    hash_type: HashType | None
+    hash: str | None
+    fn: str | None
+
+
+DownloadTask = tuple[SourceUrlSpec, str | None, str]
+RecipePaths = tuple[str, str, str, str]
+UrlBlock = list[int]
 
 
 def url_basename(url: str) -> str:
@@ -133,81 +160,81 @@ class DownloadPkg:
         self.recipes_dir = self.args.recipes_dir
         self.errors = Manager().list()
 
-    def run(self):
+    def run(self) -> None:
         """主要实现逻辑"""
 
         pkg_spec = self.get_pkg_spec()
-        self.create_feedstock(pkg_spec)  # type: ignore
+        self.create_feedstock(pkg_spec)
 
         if len(self.errors) > 0:
-            print(" Please check following error ".center(80, "-"))
+            logger.error(" Please check following error ".center(80, "-"))
             self.errors = list(set(self.errors))
             for error in self.errors:
-                print(error)
-            print("-" * 80)
+                logger.error(error)
+            logger.error("-" * 80)
 
-    def get_pkg_spec(self):
+    def get_pkg_spec(self) -> PackageSpec:
         """获取软件包的信息"""
         py = self.args.py
         ver = self.args.upper_bound
 
         spec_file = os.path.join(self.args.specs_dir, f"{self.pkg_name}.zstd")
         if not os.path.exists(spec_file):
-            print(
+            logger.error(
                 f"{Fore.RED}oo Requested package {self.pkg_name}"
                 + f" is not in database{Style.RESET_ALL}"
             )
             sys.exit(1)
 
-        pkg_specs: list[dict] = []
+        pkg_specs: list[PackageSpec] = []
         dctx = zstandard.ZstdDecompressor()
         with open(spec_file, "rb") as f:
-            pkg_specs = msgpack.loads(dctx.decompress(f.read()))  # type: ignore
+            pkg_specs = cast(
+                list[PackageSpec], msgpack.loads(dctx.decompress(f.read()))
+            )
+
+        if not pkg_specs:
+            logger.error(
+                f"{Fore.RED}oo Package {self.pkg_name} has no available specs in database"
+                f"{Style.RESET_ALL}"
+            )
+            sys.exit(1)
 
         if py and (not self.args.ignore_py):
-            filter_pkg_specs = list(filter(lambda x: py in x.get("build"), pkg_specs))  # type: ignore
+            filter_pkg_specs = [
+                spec for spec in pkg_specs if py in str(spec.get("build", ""))
+            ]
             if len(filter_pkg_specs) > 0:
                 pkg_specs = list(filter_pkg_specs)
             else:
-                print(
+                logger.warning(
                     f"{Fore.YELLOW}>> No packages with {py} build string{Style.RESET_ALL}"
                 )
 
         if self.args.subdir:
-            filter_pkg_specs = list(
-                filter(
-                    lambda x: self.args.subdir == x.get("subdir")  # type: ignore
-                    or x.get("subdir") == "noarch",  # type: ignore
-                    pkg_specs,
-                )
-            )
+            filter_pkg_specs = [
+                spec
+                for spec in pkg_specs
+                if self.args.subdir == spec["subdir"] or spec["subdir"] == "noarch"
+            ]
             if len(filter_pkg_specs) > 0:
                 pkg_specs = list(filter_pkg_specs)
             else:
-                print(
+                logger.warning(
                     f"{Fore.YELLOW}>> No packages with {self.args.subdir} found{Style.RESET_ALL}"
                 )
 
         if self.args.interact and ver:
-            pkg_specs = [
-                p
-                for p in reversed(pkg_specs)
-                if PV(p["version"]) == PV(ver)  # type: ignore
-            ]
+            pkg_specs = [p for p in reversed(pkg_specs) if PV(p["version"]) == PV(ver)]
             if len(pkg_specs) == 0:
-                print(
+                logger.error(
                     f"{Fore.RED}version {ver} of {self.pkg_name} "
                     f"is not found in the db{Style.RESET_ALL}"
                 )
                 sys.exit(1)
-        pkg_specs.sort(
-            key=lambda spec: f"{spec.get('timestamp')}-{spec.get('url')}"  # type: ignore
-        )
+        pkg_specs.sort(key=lambda spec: f"{spec['timestamp']}-{spec['url']}")
         if self.args.interact:
-            urls = [
-                f"{spec.get('timestamp')}-{spec.get('url')}"  # type: ignore
-                for spec in pkg_specs  # type: ignore
-            ]
+            urls = [f"{spec['timestamp']}-{spec['url']}" for spec in pkg_specs]
             choice = get_choice(
                 "Please choose a package to download",
                 urls,
@@ -223,35 +250,35 @@ class DownloadPkg:
 
         pkg_spec = None
         for p in reversed(pkg_specs):
-            if PV(p["version"]) <= PV(ver):  # type: ignore
+            if PV(p["version"]) <= PV(ver):
                 pkg_spec = p
                 break
         if pkg_spec is None:
-            print(
+            logger.error(
                 f"{Fore.RED}version {ver} of {self.pkg_name} "
                 f"is not found in the db{Style.RESET_ALL}"
             )
             sys.exit(1)
         return pkg_spec
 
-    def create_feedstock(self, pkg_spec: dict[str, Any]) -> list[str] | None:
+    def create_feedstock(self, pkg_spec: PackageSpec) -> None:
         """创建 feestock"""
-        pkg = pkg_spec.get("name")
-        print(
+        pkg = pkg_spec["name"]
+        logger.info(
             f"{Fore.GREEN}>> Creating feedstock for "
             + f"{pkg!r} {pkg_spec['version']}{Style.RESET_ALL}"
         )
-        print(
+        logger.info(
             f">> Downloading binary package {pkg_spec['nv']} from conda-forge channel ..."
         )
         out_fn = os.path.join(self.workdir, url_basename(pkg_spec["url"]))
 
-        url_spec = {
-            "url": pkg_spec["url"],
-            "hash_type": "md5",
-            "hash": pkg_spec["md5"],
-            "fn": url_basename(pkg_spec["url"]),
-        }
+        url_spec = SourceUrlSpec(
+            url=pkg_spec["url"],
+            hash_type="md5",
+            hash=pkg_spec["md5"],
+            fn=url_basename(pkg_spec["url"]),
+        )
         self.download_file((url_spec, pkg, self.workdir))
 
         extract_dir = (
@@ -276,78 +303,90 @@ class DownloadPkg:
         )
 
         with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
-            pool.map(self.download_file, para_pairs)
+            list(pool.map(self.download_file, para_pairs))
 
-        print(f"{Fore.GREEN}>> Replacing urls in {meta_yaml_tpl} ...{Style.RESET_ALL}")
+        logger.info(
+            f"{Fore.GREEN}>> Replacing urls in {meta_yaml_tpl} ...{Style.RESET_ALL}"
+        )
         self.replace_urls(meta_yaml_tpl, url_specs)
         if os.path.exists(os.path.join(old_recipe, "parent")):
-            print(f">> Created feedstock for {pkg!r} at {new_recipe}.")
+            logger.info(f">> Created feedstock for {pkg!r} at {new_recipe}.")
         else:
             os.remove(meta_yaml)
             shutil.move(meta_yaml_tpl, meta_yaml)
-            print(
+            logger.info(
                 f"{Fore.GREEN}>> Created feedstock for {pkg!r} "
                 + f"at {new_recipe}.{Style.RESET_ALL}"
             )
-        print(
+        logger.warning(
             f"{Fore.YELLOW}!! Please be sure to check the recipe for necessary modifications."
         )
-        print(
+        logger.warning(
             f"!! Please check if all the following dependencies are built: {Style.RESET_ALL}"
         )
 
         deps = self.extract_reqs(os.path.join(new_recipe, "meta.yaml"))
-        print("-" * 80)
-        print(deps)
-        print("-" * 80)
+        logger.info("-" * 80)
+        logger.info(deps)
+        logger.info("-" * 80)
 
-    def download_file(self, para_pairs: tuple[dict[str, Any], Any | None, str]) -> None:
+    def download_file(self, para_pairs: DownloadTask) -> None:
         """下载文件"""
         url_spec, pkg, out_dir = para_pairs
-        url = url_spec.get("url")
+        url = url_spec["url"]
         if url_spec.get("fn") is not None:
-            fn = url_spec.get("fn")
+            fn = cast(str, url_spec.get("fn"))
         else:
             if isinstance(url, list):
                 fn = url_basename(url[0])
             else:
-                fn = url_basename(url)  # type: ignore
-        fn = f"{pkg}-{fn}" if fn_is_simple(fn) else fn  # type: ignore
+                fn = url_basename(url)
+        fn = f"{pkg}-{fn}" if pkg and fn_is_simple(fn) else fn
         url_spec.update({"fn": fn})
-        full_fn = os.path.join(out_dir, fn)  # type: ignore
+        full_fn = os.path.join(out_dir, fn)
 
-        dl_urls = url
-        if not isinstance(url, list):
-            dl_urls = [url]
+        dl_urls = [url] if not isinstance(url, list) else list(url)
         dl_urls = [
-            urllib.parse.urljoin("https://github.moeyy.xyz/", u) if "github" in u else u  # type: ignore
-            for u in dl_urls  # type: ignore
+            urllib.parse.urljoin("https://github.moeyy.xyz/", item)
+            if "github" in item
+            else item
+            for item in dl_urls
         ]
 
         if os.path.exists(full_fn):
-            file_hash = hash_files([full_fn], url_spec.get("hash_type"))  # type: ignore
-            if file_hash == url_spec.get("hash"):
-                print(
-                    f"{Fore.YELLOW}oo {fn} exists, skip downloading.{Style.RESET_ALL}"
-                )
-            else:
+            hash_type = url_spec.get("hash_type")
+            file_hash = url_spec.get("hash")
+            if hash_type and file_hash:
+                local_hash = hash_files([full_fn], hash_type)
+                if local_hash == file_hash:
+                    logger.info(
+                        f"{Fore.YELLOW}oo {fn} exists, skip downloading.{Style.RESET_ALL}"
+                    )
+                    return
                 os.unlink(full_fn)
                 self.local_download(dl_urls, full_fn)
+            else:
+                logger.info(
+                    f"{Fore.YELLOW}oo {fn} exists, skip downloading because no hash is available.{Style.RESET_ALL}"
+                )
+                return
         else:
             self.local_download(dl_urls, full_fn)
 
-    def local_download(self, dl_urls: list, fn: str) -> list[str] | None:
+    def local_download(self, dl_urls: list[str], fn: str) -> None:
         """包装 download"""
         for url in dl_urls:
             res = self.download(url, fn)
             if isinstance(res, bool) and res is True:
-                print(f"\noo File saved to {fn}{Style.RESET_ALL}")
+                logger.info(f"oo File saved to {fn}{Style.RESET_ALL}")
                 return
             # 重试一次
-            print(f"{Fore.RED}oo Downloading error, retry once.{Style.RESET_ALL}")
+            logger.warning(
+                f"{Fore.RED}oo Downloading error, retry once.{Style.RESET_ALL}"
+            )
             res = self.download(url, fn)
             if isinstance(res, bool) and res is True:
-                print(f"\noo File saved to {fn}{Style.RESET_ALL}")
+                logger.info(f"oo File saved to {fn}{Style.RESET_ALL}")
                 return
             if res is False:
                 msg = (
@@ -369,22 +408,14 @@ class DownloadPkg:
             url_segs = urllib.parse.urlparse(url)
             netloc = url_segs.netloc
             with open(fn, "wb") as out:
-                print(f"{Fore.YELLOW}oo Connecting to {netloc}")
+                logger.info(f"{Fore.YELLOW}oo Connecting to {netloc}")
                 with urllib.request.urlopen(url) as f:
-                    print(
-                        f"oo Downloading {basefn} from {url}\noo ", end="", flush=True
-                    )
-                    print(f"oo Downloading {basefn} to {dest}\noo ", end="", flush=True)
-                    blocks = 0
+                    logger.info(f"oo Downloading {basefn} from {url}")
+                    logger.info(f"oo Downloading {basefn} to {dest}")
                     while True:
                         s = f.read(chunk_size)
                         if len(s) == 0:
                             break
-                        print(".", end="", flush=True)
-                        blocks += 1
-                        if blocks == 77:
-                            print("\noo ", flush=True, end="")
-                            blocks = 0
                         out.write(s)
             return True
         except urllib.error.HTTPError:
@@ -392,9 +423,11 @@ class DownloadPkg:
         except Exception as e:
             return e
 
-    def unpack_conda_pkg(self, out_fn, extract_dir, pkg_spec):
+    def unpack_conda_pkg(
+        self, out_fn: str, extract_dir: str, pkg_spec: PackageSpec
+    ) -> None:
         """解压下载下来的 conda 包"""
-        print(f">> Unpacking {os.path.basename(out_fn)} to {extract_dir}...")
+        logger.info(f">> Unpacking {os.path.basename(out_fn)} to {extract_dir}...")
         shutil.rmtree(extract_dir, ignore_errors=True)
         os.makedirs(extract_dir, exist_ok=True)
         if ".conda" in out_fn:
@@ -407,7 +440,7 @@ class DownloadPkg:
         else:
             extract_archive(out_fn, extract_dir)
 
-    def unpack_recipe(self, pkg_spec):
+    def unpack_recipe(self, pkg_spec: PackageSpec) -> RecipePaths:
         """从下载的 conda 包中解压出 recipe"""
         old_recipe = os.path.normpath(os.path.join(self.extract_dir, "info", "recipe"))
         new_recipe = os.path.normpath(os.path.join(self.recipes_dir, pkg_spec["nv"]))
@@ -415,7 +448,7 @@ class DownloadPkg:
         if os.path.exists(new_recipe):
             shutil.rmtree(new_recipe)
         if os.path.exists(os.path.join(old_recipe, "parent")):
-            print(
+            logger.warning(
                 f"{Fore.RED}!! {self.pkg_name} is a multi-output package, "
                 f"correct its name{Style.RESET_ALL}"
             )
@@ -424,24 +457,24 @@ class DownloadPkg:
             meta_yaml = os.path.join(old_recipe, "meta.yaml")
             meta_yaml_tpl = os.path.join(new_recipe, "meta.yaml")
         else:
-            print(f">> Copying recipe to {new_recipe} ...")
+            logger.info(f">> Copying recipe to {new_recipe} ...")
             shutil.copytree(old_recipe, new_recipe)
             conda_build_cfg = os.path.join(new_recipe, "conda_build_config.yaml")
             meta_yaml = os.path.join(new_recipe, "meta.yaml")
             meta_yaml_tpl = os.path.join(new_recipe, "meta.yaml.template")
             if os.path.exists(conda_build_cfg):
-                print(f">> Removing redundant {conda_build_cfg} ...")
+                logger.info(f">> Removing redundant {conda_build_cfg} ...")
                 os.remove(conda_build_cfg)
-        print(f">> Downloading packages to {self.pkgs_dir} ...")
+        logger.info(f">> Downloading packages to {self.pkgs_dir} ...")
         return old_recipe, new_recipe, meta_yaml, meta_yaml_tpl
 
     @staticmethod
-    def load_urls(meta_yaml: str) -> list[dict[str, str]]:
+    def load_urls(meta_yaml: str) -> list[SourceUrlSpec]:
         """从 meta.yaml 中获取可下载的所有 url 地址"""
         loader = ruamel.yaml.YAML()
         with open(meta_yaml, encoding="utf8") as f:
             meta = loader.load(f)
-        result = []
+        result: list[SourceUrlSpec] = []
         if "source" not in meta:
             return []
         sources = meta["source"]
@@ -450,25 +483,26 @@ class DownloadPkg:
         for item in sources:
             # 当前只支持下载 url 类型的来源
             if "url" not in item:
-                print(
+                logger.warning(
                     f"{Fore.YELLOW}Not supporting source type for {item}{Style.RESET_ALL}"
                 )
                 continue
             url = item["url"]
-            hash_type, file_hash = None, None
+            hash_type: HashType | None = None
+            file_hash = None
             for ht in ["md5", "sha1", "sha256"]:
                 if ht in item:
-                    hash_type = ht
+                    hash_type = ht  # type: ignore
                     break
             if hash_type is not None:
                 file_hash = item[hash_type]
             fn = item.get("fn", None)
             result.append(
-                {"url": url, "hash_type": hash_type, "hash": file_hash, "fn": fn}
+                SourceUrlSpec(url=url, hash_type=hash_type, hash=file_hash, fn=fn)
             )
         return result
 
-    def replace_urls(self, meta_yaml_tpl: str, url_specs: list[dict[str, str]]) -> None:
+    def replace_urls(self, meta_yaml_tpl: str, url_specs: list[SourceUrlSpec]) -> None:
         """替换 meta.yaml 中 url 地址"""
         with open(meta_yaml_tpl, encoding="utf-8") as f:
             content = f.read().split("\n")
@@ -481,7 +515,7 @@ class DownloadPkg:
                 f.write("\n".join(new_contents))
 
     @staticmethod
-    def get_url_block(content):
+    def get_url_block(content: list[str]) -> list[UrlBlock]:
         """获取 meta 中关于 url 的那些行的范围"""
         url_blocks = []
         for ln, line in enumerate(content):
@@ -492,16 +526,21 @@ class DownloadPkg:
                 url_blocks.append([ln, ln + 1])
             else:
                 cln = ln
-                next_line = content[cln + 1]
-                while (next_line.strip() == "" or "://" in next_line) and cln <= len(
-                    content
-                ):
-                    cln += 1
+                while cln + 1 < len(content):
                     next_line = content[cln + 1]
+                    if not (next_line.strip() == "" or "://" in next_line):
+                        break
+                    cln += 1
                 url_blocks.append([ln, cln + 1])
         return url_blocks
 
-    def get_new_contents(self, content, url_blocks, url_specs, meta_yaml_tpl):
+    def get_new_contents(
+        self,
+        content: list[str],
+        url_blocks: list[UrlBlock],
+        url_specs: list[SourceUrlSpec],
+        meta_yaml_tpl: str,
+    ) -> list[str]:
         """生成新的 meta.yaml 内容"""
         new_contents = content[0 : url_blocks[0][0]]
         for idx, block in enumerate(url_blocks):
@@ -511,11 +550,12 @@ class DownloadPkg:
             if match_url_spec is not None:
                 fn = os.path.basename(urllib.parse.urlparse(new_url).path)
                 if match_url_spec.get("fn") is not None:
-                    fn = match_url_spec.get("fn")
-                fn = f"{self.args.PKGNAME}-{fn}" if fn_is_simple(fn) else fn  # type: ignore
+                    fn = cast(str, match_url_spec.get("fn"))
+                fn = str(fn)
+                fn = f"{self.args.PKGNAME}-{fn}" if fn_is_simple(fn) else fn
                 pkg_path = os.path.join(self.pkgs_dir, fn)
                 pkg_path = os.path.relpath(pkg_path, os.path.dirname(meta_yaml_tpl))
-                if len(block_content) == 1:
+                if len(block_content) == 1 and m is not None:
                     new_contents.append(m.group(1) + pkg_path)
                     # 原有的 source 加上注释
                     comment_block_content = "#" + block_content[0]
@@ -525,14 +565,18 @@ class DownloadPkg:
                     # 原有的 source 加上注释
                     comment_block_content = ["#" + line for line in block_content]
                     new_contents.extend(comment_block_content)
-            if idx != (len(url_specs) - 1):
+            else:
+                new_contents.extend(block_content)
+            if idx != (len(url_blocks) - 1):
                 # pylint: disable-next=unnecessary-list-index-lookup
                 new_contents += content[url_blocks[idx][1] : url_blocks[idx + 1][0]]
         new_contents += content[url_blocks[-1][1] :]
         return new_contents
 
     @staticmethod
-    def get_new_url(block_content, url_specs):
+    def get_new_url(
+        block_content: list[str], url_specs: list[SourceUrlSpec]
+    ) -> tuple[Match[str] | None, str | None, SourceUrlSpec | None]:
         """得到新的 url 地址"""
         change_line = ""
         if len(block_content) == 1:
@@ -548,13 +592,17 @@ class DownloadPkg:
                 m = url_p3.match(change_line)
             else:
                 m = url_p1.match(change_line)
-            new_url_pattern = re.escape(m.group(2)) + r".*" + re.escape(m.group(3))  # type: ignore
+            if m is None:
+                return None, None, None
+            new_url_pattern = re.escape(m.group(2)) + r".*" + re.escape(m.group(3))
         else:
             if len(block_content) == 1:
                 m = url_p2.match(change_line)
             else:
                 m = url_p1.match(change_line)
-            new_url_pattern = re.escape(m.group(2))  # type: ignore
+            if m is None:
+                return None, None, None
+            new_url_pattern = re.escape(m.group(2))
 
         new_url, match_url_spec = None, None
 

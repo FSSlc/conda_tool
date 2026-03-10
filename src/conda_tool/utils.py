@@ -133,13 +133,7 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
     if fmt == "zst":
         extract_zst(archive, out_path)
     elif fmt == "conda":
-        # 使用自定义逻辑处理 conda 格式，避免弃用警告
-        with tarfile.open(archive, "r:*") as tar:
-            if hasattr(tarfile, 'data_filter'):
-                # Python 3.12+ 支持 filter 参数
-                tar.extractall(out_path, filter="data")
-            else:
-                tar.extractall(out_path)
+        shutil.unpack_archive(archive, out_path, format="zip")
     elif fmt in [
         "zip",
         "tar",
