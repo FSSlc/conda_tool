@@ -27,6 +27,11 @@ def setup_logging(terminal_width: int | None = None) -> None:
     from rich.logging import RichHandler
 
     logger = logging.getLogger("conda_tool")
+    if logger.handlers:
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        return
+
     console = Console(width=terminal_width) if terminal_width else None
     rich_handler = RichHandler(
         show_time=False,

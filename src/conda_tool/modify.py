@@ -17,7 +17,7 @@ from logging import getLogger
 from typing import Any
 from zipfile import ZIP_STORED, ZipFile
 
-logger = getLogger(__name__)
+logger = getLogger("conda_tool.modify")
 
 try:
     import pathspec
@@ -716,20 +716,20 @@ class Modify:
             # 修改 paths.json 文件
             strip_rel_path = os.path.relpath(strip_path, pkg_info["binary_path"])
             paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
-            new_paths_info = list(
-                filter(
-                    lambda x: x.get("_path") == strip_rel_path,
-                    paths_json_data["paths"],
-                )
-            )[0]
-            # 大小和 sha256 需要更新
-            new_paths_info.update(
-                {
-                    "sha256": hash_files([strip_abs_path]),
-                    "size_in_bytes": os.path.getsize(strip_abs_path),
-                }
-            )
-            paths_json_data["paths"] = new_paths_info
+            updated = False
+            for item in paths_json_data["paths"]:
+                if item.get("_path") == strip_rel_path:
+                    # 大小和 sha256 需要更新
+                    item.update(
+                        {
+                            "sha256": hash_files([strip_abs_path]),
+                            "size_in_bytes": os.path.getsize(strip_abs_path),
+                        }
+                    )
+                    updated = True
+                    break
+            if not updated:
+                logger.warning(f"paths.json missing entry for {strip_rel_path}")
             paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
             with open(paths_json_path, "w", encoding="utf-8") as fout:
                 fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))

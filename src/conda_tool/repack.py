@@ -15,7 +15,7 @@ except ImportError:
     from conda_tool.utils import abs_path, hash_files, setup_logging
 
 setup_logging(120)
-logger = getLogger(__name__)
+logger = getLogger("conda_tool.repack")
 
 
 def parse_args() -> argparse.Namespace:

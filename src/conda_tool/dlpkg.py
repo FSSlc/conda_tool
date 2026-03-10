@@ -42,7 +42,7 @@ except ImportError:
 
 
 setup_logging(120)
-logger = getLogger(__name__)
+logger = getLogger("conda_tool.dlpkg")
 
 fn_is_simple = re.compile(r"^v?\d+([\-.]\d+)+(\.\w+)+$").match
 url_p1 = re.compile(r"(^\s*-\s*)(.*)$")

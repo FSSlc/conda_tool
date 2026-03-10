@@ -16,7 +16,7 @@ except ImportError:
 
 
 setup_logging(120)
-logger = getLogger(__name__)
+logger = getLogger("conda_tool.extract")
 
 HEADER_PREFIXES = {
     b"# NAME:  ": "name",
