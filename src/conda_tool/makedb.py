@@ -10,18 +10,25 @@ import os
 import sys
 import urllib.parse
 from collections import defaultdict
+from collections.abc import Iterable
+from logging import getLogger
 from typing import Any
 
 import aiofiles
 import aiohttp
 import msgpack
 import zstandard
+from packaging.version import InvalidVersion
 from packaging.version import parse as PV
 
 try:
-    from .utils import SCRIPT_DIR
+    from .utils import SCRIPT_DIR, setup_logging
 except ImportError:
-    from conda_tool.utils import SCRIPT_DIR
+    from conda_tool.utils import SCRIPT_DIR, setup_logging
+
+
+setup_logging(120)
+logger = getLogger("conda_tool.makedb")
 
 
 async def download_with_retry(
@@ -55,13 +62,13 @@ async def save_repodata(arch: str, forge_url: str) -> dict[str, Any]:
         forge_url += "/"
     url = urllib.parse.urljoin(forge_url, f"{arch}/repodata.json.bz2")
 
-    print(f"Downloading {url} ...")
+    logger.info(f"Downloading {url} ...")
     try:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=300)
         ) as session:
             compressed_data = await download_with_retry(session, url)
-            print(f"Processing {url} ...")
+            logger.info(f"Processing {url} ...")
             repodata = bz2.decompress(compressed_data)
             repodata = json.loads(repodata)
 
@@ -77,9 +84,9 @@ async def save_repodata(arch: str, forge_url: str) -> dict[str, Any]:
                     compressed = cctx.compress(msgpack.dumps(data))  # type: ignore
                     await f.write(compressed)
             except OSError as e:
-                print(f"Error saving compressed data: {str(e)}", file=sys.stderr)
+                logger.error(f"Error saving compressed data: {str(e)}")
     except Exception as e:
-        print(f"Error processing {url}: {str(e)}", file=sys.stderr)
+        logger.error(f"Error processing {url}: {str(e)}")
         raise
 
     return data
@@ -107,7 +114,7 @@ async def process_package(
             }
         )
     except KeyError as e:
-        print(f"Invalid package data for {pn}, missing key: {str(e)}", file=sys.stderr)
+        logger.warning(f"Invalid package data for {pn}, missing key: {str(e)}")
 
 
 async def save_single_package(package_name: str, package_data: list[dict]) -> None:
@@ -123,7 +130,7 @@ async def save_single_package(package_name: str, package_data: list[dict]) -> No
             key=lambda x: (PV(x["version"]), x["timestamp"], x["build"]),
             reverse=True,
         )
-    except Exception:
+    except (InvalidVersion, TypeError):
         package_data = sorted(
             package_data,
             key=lambda x: (x["version"], x["timestamp"], x["build"]),
@@ -138,25 +145,39 @@ async def save_single_package(package_name: str, package_data: list[dict]) -> No
         async with aiofiles.open(file_path, "wb") as f:
             await f.write(compressed)
     except OSError as e:
-        print(f"Error saving package {package_name}: {str(e)}", file=sys.stderr)
+        logger.error(f"Error saving package {package_name}: {str(e)}")
+
+
+def iter_repodata_items(
+    data: dict[str, Any] | list[dict[str, Any]],
+) -> Iterable[tuple[str, dict[str, Any]]]:
+    """迭代一个或多个 repodata 字典中的包记录。"""
+    repodata_groups = [data] if isinstance(data, dict) else data
+    for repodata in repodata_groups:
+        yield from repodata.items()
 
 
 async def parse_repodata(
-    data: dict[str, Any],
+    data: dict[str, Any] | list[dict[str, Any]],
     forge_url: str,
     semaphore: asyncio.Semaphore,
     file_semaphore: asyncio.Semaphore,
 ) -> None:
     """异步转换 repodata 数据"""
-    print("Extracting package database ...")
+    logger.info("Extracting package database ...")
     pkg_db = defaultdict(list)
 
     # 并行处理包数据
-    print("Processing packages ...")
-    tasks = []
-    async with semaphore:
-        for pn, p in data.items():
-            tasks.append(process_package(pkg_db, pn, p, forge_url))
+    logger.info("Processing packages ...")
+    async def process_with_limit(pn: str, p: dict[str, Any]) -> None:
+        async with semaphore:
+            await process_package(pkg_db, pn, p, forge_url)
+
+    package_items = list(iter_repodata_items(data))
+    process_batch_size = 1000
+    for index in range(0, len(package_items), process_batch_size):
+        batch = package_items[index : index + process_batch_size]
+        tasks = [process_with_limit(pn, p) for pn, p in batch]
         await asyncio.gather(*tasks)
 
     # 分批保存包数据以避免打开太多文件
@@ -164,12 +185,16 @@ async def parse_repodata(
     package_items = list(pkg_db.items())
     for i in range(0, len(package_items), batch_size):
         batch = package_items[i : i + batch_size]
-        tasks = []
-        async with file_semaphore:
-            for package_name, package_data in batch:
-                tasks.append(save_single_package(package_name, package_data))
-            await asyncio.gather(*tasks)
-        print(
+        async def save_with_limit(package_name: str, package_data: list[dict]) -> None:
+            async with file_semaphore:
+                await save_single_package(package_name, package_data)
+
+        tasks = [
+            save_with_limit(package_name, package_data)
+            for package_name, package_data in batch
+        ]
+        await asyncio.gather(*tasks)
+        logger.info(
             f"Processed batch {i // batch_size + 1}/{(len(package_items) - 1) // batch_size + 1}"
         )
 
@@ -183,7 +208,7 @@ async def load_existing_data(arch: str) -> dict[str, Any]:
             data = await f.read()
             return msgpack.loads(dctx.decompress(data))  # type: ignore
     except Exception as e:
-        print(f"Error loading existing data for {arch}: {str(e)}", file=sys.stderr)
+        logger.error(f"Error loading existing data for {arch}: {str(e)}")
         return {}
 
 
@@ -217,7 +242,7 @@ def parse_args() -> argparse.Namespace:
             "zos-z",
         ],
         default=["noarch", "linux-64", "linux-aarch64"],
-        help="Conda arch (default: %(default)s",
+        help="Conda arch (default: %(default)s)",
     )
     parser.add_argument(
         "--url",
@@ -227,7 +252,7 @@ def parse_args() -> argparse.Namespace:
             "https://mirrors.nju.edu.cn/anaconda/cloud/conda-forge",
         ],
         default="https://conda.anaconda.org/conda-forge",
-        help="Conda forge url (default: %(default)s",
+        help="Conda forge url (default: %(default)s)",
     )
     parser.add_argument(
         "-f",
@@ -262,10 +287,10 @@ async def process_arch(
             os.path.exists(f"{SCRIPT_DIR}/data/{arch}/data.zstd")
             and not args.force_refresh
         ):
-            print(f"Loading existing data for {arch}...")
+            logger.info(f"Loading existing data for {arch}...")
             data = await load_existing_data(arch)
         else:
-            print(f"Downloading fresh data for {arch}...")
+            logger.info(f"Downloading fresh data for {arch}...")
             data = await save_repodata(arch, args.CONDA_FORGE_URL)
 
         return data
@@ -288,20 +313,20 @@ async def async_main() -> None:
     # 检查并处理结果
     for arch, result in zip(args.ARCHES, results, strict=False):
         if isinstance(result, Exception):
-            print(f"Error processing {arch}: {str(result)}", file=sys.stderr)
+            logger.error(f"Error processing {arch}: {str(result)}")
         else:
             data[arch] = result
 
     # 解析数据
     if data:
         await parse_repodata(
-            {k: v for d in data.values() for k, v in d.items()},  # 合并所有架构的数据
+            list(data.values()),
             args.CONDA_FORGE_URL,
             semaphore,
             file_semaphore,
         )
     else:
-        print("No valid data to process", file=sys.stderr)
+        logger.error("No valid data to process")
         sys.exit(1)
 
 
@@ -310,10 +335,10 @@ def main() -> None:
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user", file=sys.stderr)
+        logger.warning("Operation cancelled by user")
         sys.exit(1)
     except Exception as e:
-        print(f"Fatal error: {str(e)}", file=sys.stderr)
+        logger.error(f"Fatal error: {str(e)}")
         sys.exit(1)
 
 

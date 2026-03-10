@@ -1,0 +1,121 @@
+import asyncio
+import unittest
+from unittest import mock
+
+from conda_tool import makedb
+
+
+class ParseRepodataTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parse_repodata_groups_records_by_package_name(self) -> None:
+        data = {
+            "foo-1.0-0.tar.bz2": {
+                "name": "foo",
+                "version": "1.0",
+                "depends": ["python >=3.10"],
+                "md5": "md5-foo-1.0",
+                "build": "0",
+                "subdir": "linux-64",
+                "timestamp": 10,
+            },
+            "foo-1.1-0.tar.bz2": {
+                "name": "foo",
+                "version": "1.1",
+                "depends": ["python >=3.11"],
+                "md5": "md5-foo-1.1",
+                "build": "0",
+                "subdir": "linux-64",
+                "timestamp": 20,
+            },
+            "bar-2.0-0.conda": {
+                "name": "bar",
+                "version": "2.0",
+                "depends": [],
+                "md5": "md5-bar-2.0",
+                "build": "py_0",
+                "subdir": "noarch",
+                "timestamp": 30,
+            },
+        }
+        saved_packages: dict[str, list[dict]] = {}
+
+        async def fake_save_single_package(
+            package_name: str, package_data: list[dict]
+        ) -> None:
+            saved_packages[package_name] = package_data
+
+        with mock.patch.object(
+            makedb, "save_single_package", side_effect=fake_save_single_package
+        ) as mocked_save:
+            await makedb.parse_repodata(
+                data,
+                "https://conda.anaconda.org/conda-forge",
+                asyncio.Semaphore(2),
+                asyncio.Semaphore(2),
+            )
+
+        self.assertEqual(mocked_save.await_count, 2)
+        self.assertEqual(set(saved_packages), {"foo", "bar"})
+        self.assertEqual(
+            {item["version"] for item in saved_packages["foo"]}, {"1.0", "1.1"}
+        )
+        self.assertEqual(
+            saved_packages["bar"][0]["url"],
+            "https://conda.anaconda.org/conda-forge/noarch/bar-2.0-0.conda",
+        )
+
+    async def test_parse_repodata_preserves_same_filename_from_multiple_arches(self) -> None:
+        saved_packages: dict[str, list[dict]] = {}
+        repodata_sets = [
+            {
+                "shared-1.0-0.tar.bz2": {
+                    "name": "shared",
+                    "version": "1.0",
+                    "depends": [],
+                    "md5": "md5-linux",
+                    "build": "0",
+                    "subdir": "linux-64",
+                    "timestamp": 10,
+                }
+            },
+            {
+                "shared-1.0-0.tar.bz2": {
+                    "name": "shared",
+                    "version": "1.0",
+                    "depends": [],
+                    "md5": "md5-noarch",
+                    "build": "0",
+                    "subdir": "noarch",
+                    "timestamp": 20,
+                }
+            },
+        ]
+
+        async def fake_save_single_package(
+            package_name: str, package_data: list[dict]
+        ) -> None:
+            saved_packages[package_name] = package_data
+
+        with mock.patch.object(
+            makedb, "save_single_package", side_effect=fake_save_single_package
+        ):
+            await makedb.parse_repodata(
+                repodata_sets,
+                "https://conda.anaconda.org/conda-forge",
+                asyncio.Semaphore(2),
+                asyncio.Semaphore(2),
+            )
+
+        self.assertEqual(len(saved_packages["shared"]), 2)
+        self.assertEqual(
+            {item["subdir"] for item in saved_packages["shared"]},
+            {"linux-64", "noarch"},
+        )
+
+
+class LoggingTests(unittest.TestCase):
+    def test_module_logger_uses_conda_tool_namespace(self) -> None:
+        self.assertEqual(makedb.logger.name, "conda_tool.makedb")
+
+
+if __name__ == "__main__":
+    unittest.main()
