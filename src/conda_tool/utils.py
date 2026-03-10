@@ -116,7 +116,11 @@ def extract_zst(archive: str, out_path: str) -> None:
             dctx.copy_stream(ifh, ofh)
         ofh.seek(0)
         with tarfile.open(fileobj=ofh) as z:
-            z.extractall(out_path)
+            if hasattr(tarfile, 'data_filter'):
+                # Python 3.12+ 支持 filter 参数
+                z.extractall(out_path, filter="data")
+            else:
+                z.extractall(out_path)
 
 
 def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
@@ -124,7 +128,13 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
     if fmt == "zst":
         extract_zst(archive, out_path)
     elif fmt == "conda":
-        shutil.unpack_archive(archive, out_path, format="zip")
+        # 使用自定义逻辑处理 conda 格式，避免弃用警告
+        with tarfile.open(archive, "r:*") as tar:
+            if hasattr(tarfile, 'data_filter'):
+                # Python 3.12+ 支持 filter 参数
+                tar.extractall(out_path, filter="data")
+            else:
+                tar.extractall(out_path)
     elif fmt in [
         "zip",
         "tar",
@@ -144,7 +154,11 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
                         # 跳过可疑的符号链接
                         if member.issym() and ".." in member.linkname:
                             continue
-                        tar.extract(member, out_path, set_attrs=False)
+                        if hasattr(tarfile, 'data_filter'):
+                            # Python 3.12+ 支持 filter 参数
+                            tar.extract(member, out_path, set_attrs=False, filter="data")
+                        else:
+                            tar.extract(member, out_path, set_attrs=False)
                     except OSError as e:
                         print(f"Warning: Failed to extract {member.name}: {str(e)}")
                         continue
@@ -166,6 +180,18 @@ def extract_large_tar(tar_path, extract_path, chunk_size=8192, debug=False):
 
             for index, member in enumerate(members, 1):
                 try:
+                    # 防止路径穿越与符号链接攻击
+                    member_name = member.name
+                    if (
+                        os.path.isabs(member_name)
+                        or ".." in member_name.split(os.path.sep)
+                        or member.issym()
+                        or member.islnk()
+                    ):
+                        if debug:
+                            print(f"警告：跳过可疑条目 {member.name}")
+                        continue
+
                     if debug:
                         print(
                             f"进度：{index:03d}/{total_files:03d} ({(index / total_files) * 100:06.2f}%)"
@@ -191,7 +217,11 @@ def extract_large_tar(tar_path, extract_path, chunk_size=8192, debug=False):
                             source.close()
                     else:
                         # 对于目录，直接创建
-                        tar.extract(member, extract_path)
+                        if hasattr(tarfile, 'data_filter'):
+                            # Python 3.12+ 支持 filter 参数
+                            tar.extract(member, extract_path, filter="data")
+                        else:
+                            tar.extract(member, extract_path)
                     # 定期进行垃圾回收
                     if index % 100 == 0:
                         gc.collect()

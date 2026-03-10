@@ -168,4 +168,5 @@ cython_debug/
 .ruff_cache
 
 # local files
-test
+tmp
+output
