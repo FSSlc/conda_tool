@@ -15,7 +15,6 @@ except ImportError:
     from conda_tool.utils import SCRIPT_DIR, abs_path, extract_large_tar, setup_logging
 
 
-setup_logging(120)
 logger = getLogger("conda_tool.extract")
 
 HEADER_PREFIXES = {
@@ -295,6 +294,7 @@ class Extractor:
 
 def main() -> None:
     """主函数"""
+    setup_logging(120)
     args = parse_args()
     extractor = Extractor(args)
     extractor.run()

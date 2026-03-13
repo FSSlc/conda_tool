@@ -1,17 +1,15 @@
 #!/usr/bin/env python
 
-"""Mofdify a conda package according to a rule file."""
+"""Modify a conda package according to a rule file."""
 
 import argparse
 import concurrent.futures
 import json
 import os
-import queue
 import shutil
 import subprocess
 import sys
 import tarfile
-import threading
 from collections import defaultdict
 from logging import getLogger
 from typing import Any
@@ -52,12 +50,9 @@ except ImportError:
         tmp_chdir,
     )
 
-setup_logging(120)
-
 CONDA_PACKAGE_FORMAT_VERSION = 2
 MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 CHUNK_SIZE = 8192 * 8
-FILE_QUEUE_SIZE = 1000
 
 EXAMPLE_DATA = {
     "conda": {
@@ -105,8 +100,6 @@ class FileProcessor:
 
     def __init__(self):
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
-        self.lock = threading.Lock()
-        self.file_queue = queue.Queue(maxsize=FILE_QUEUE_SIZE)
 
     def process_files_concurrently(
         self, file_pairs: list[tuple[str, str]], operation: str
@@ -173,6 +166,7 @@ class FileProcessor:
         is_elf = is_elf_file(path)
         if not is_elf:
             logger.warning("not a ELF file, ignore this file.")
+            return
         try:
             subprocess.run(
                 ["strip", "--strip-debug", path],
@@ -182,8 +176,15 @@ class FileProcessor:
         except subprocess.CalledProcessError as e:
             logger.error(f"Strip failed for {path}: {e.stderr.decode()}")
 
-    def __del__(self):
+    def shutdown(self) -> None:
+        """Shutdown file processing resources"""
         self.executor.shutdown(wait=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.shutdown()
 
 
 class Modify:
@@ -197,24 +198,27 @@ class Modify:
 
     def run(self) -> None:
         """具体实现逻辑"""
-        # 1. 检查参数
-        self.check_args()
-        # 2. 读取配置
-        logger.info("开始读取配置文件")
-        with open(self.config_path, encoding="utf-8") as fin:
-            self.config = json.load(fin)
-        # 3. 获取配置信息并检测配置
-        pkg_infos = self.get_pkg_infos()
-        logger.info("读取配置文件完毕")
+        try:
+            # 1. 检查参数
+            self.check_args()
+            # 2. 读取配置
+            logger.info("开始读取配置文件")
+            with open(self.config_path, encoding="utf-8") as fin:
+                self.config = json.load(fin)
+            # 3. 获取配置信息并检测配置
+            pkg_infos = self.get_pkg_infos()
+            logger.info("读取配置文件完毕")
 
-        logger.info("开始检查配置文件")
-        filter_pkgs_infos = self.check_config(pkg_infos)
-        logger.info("检查配置文件完毕")
+            logger.info("开始检查配置文件")
+            filter_pkgs_infos = self.check_config(pkg_infos)
+            logger.info("检查配置文件完毕")
 
-        # 4. 修改文件并重新打包
-        for pkg_info in filter_pkgs_infos:
-            self.handle_one_package(pkg_info)
-        logger.info("修改完毕")
+            # 4. 修改文件并重新打包
+            for pkg_info in filter_pkgs_infos:
+                self.handle_one_package(pkg_info)
+            logger.info("修改完毕")
+        finally:
+            self.file_processor.shutdown()
 
     def check_args(self) -> None:
         """检验输入参数"""
@@ -367,38 +371,30 @@ class Modify:
             if not os.path.isabs(k):
                 src_path = os.path.abspath(os.path.normpath(os.path.join(src_dir, k)))
             if os.path.isfile(src_path):
-                if not os.path.exists(src_path):
-                    msg = f"Error, rule {rule_type} '{k}:{v}', {k} is not a valid exist path"
-                    errors[pkg_name].append(msg)
+                if v.endswith("/"):
+                    new_path = os.path.join(
+                        pkg_info["binary_path"], v, os.path.basename(src_path)
+                    )
                 else:
-                    if v.endswith("/"):
-                        new_path = os.path.join(
-                            pkg_info["binary_path"], v, os.path.basename(src_path)
-                        )
-                    else:
-                        new_path = os.path.join(pkg_info["binary_path"], v)
-                    expand_rules[src_path] = new_path
+                    new_path = os.path.join(pkg_info["binary_path"], v)
+                expand_rules[src_path] = new_path
             elif os.path.isdir(src_path):
-                if not os.path.exists(src_path):
-                    msg = f"Error, rule {rule_type} '{k}:{v}', {k} is not a valid exist path"
+                if not v.endswith("/"):
+                    msg = (
+                        f"Error, rule {rule_type} '{k}:{v}', {k} is a dir"
+                        " then {v} must endswith '/'"
+                    )
                     errors[pkg_name].append(msg)
                 else:
-                    if not v.endswith("/"):
-                        msg = (
-                            f"Error, rule {rule_type} '{k}:{v}', {k} is a dir"
-                            " then {v} must endswith '/'"
+                    # 如果是目录，则将目录放到目标目录下
+                    new_dir = os.path.join(pkg_info["binary_path"], v)
+                    file_lists = get_filelist(src_path, with_prefix=True)
+                    for file in file_lists:
+                        expand_rules[file] = os.path.join(
+                            new_dir,
+                            src_path.strip("/").split("/")[-1],
+                            os.path.relpath(file, start=src_path),
                         )
-                        errors[pkg_name].append(msg)
-                    else:
-                        # 如果是目录，则将目录放到目标目录下
-                        new_dir = os.path.join(pkg_info["binary_path"], v)
-                        file_lists = get_filelist(src_path, with_prefix=True)
-                        for file in file_lists:
-                            expand_rules[file] = os.path.join(
-                                new_dir,
-                                src_path.strip("/").split("/")[-1],
-                                os.path.relpath(file, start=src_path),
-                            )
             else:
                 # 通配符
                 src_path_dirname = os.path.dirname(src_path)
@@ -617,7 +613,7 @@ class Modify:
         # Update file metadata
         for i, (_, new_file_path) in enumerate(file_pairs):
             try:
-                new_data[i]["sha256"] = hash_files([new_file_path])
+                new_data[i]["sha256"] = hash_files([new_file_path], algorithm="sha256")
                 new_data[i]["size_in_bytes"] = os.path.getsize(new_file_path)
             except Exception as e:
                 logger.error(f"Failed to update metadata for {new_file_path}: {str(e)}")
@@ -663,18 +659,15 @@ class Modify:
                     item["_path"] = new_rel_path
                     break
 
-            paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
-            with open(paths_json_path, "w", encoding="utf-8") as fout:
-                fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
+        paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
+        with open(paths_json_path, "w", encoding="utf-8") as fout:
+            fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
 
     def handle_delete_rule(self, pkg_info: dict[str, Any]) -> None:
         """执行删除操作"""
         delete_rule = pkg_info["rule"]["delete"]
 
-        files_to_delete = [
-            os.path.join(pkg_info["binary_path"], delete_path)
-            for delete_path in delete_rule
-        ]
+        files_to_delete = list(delete_rule)
 
         # Process deletions concurrently
         self.file_processor.process_files_concurrently(
@@ -699,8 +692,9 @@ class Modify:
     def handle_strip_rule(self, pkg_info: dict[str, Any]) -> None:
         """执行压缩操作"""
         strip_rule = pkg_info["rule"]["strip"]
-        for strip_path in strip_rule:
-            strip_abs_path = os.path.join(pkg_info["binary_path"], strip_path)
+        paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
+
+        for strip_abs_path in strip_rule:
             is_elf = is_elf_file(strip_abs_path)
             if not is_elf:
                 logger.warning("not a ELF file, ignore this file.")
@@ -714,15 +708,14 @@ class Modify:
             except subprocess.CalledProcessError as e:
                 logger.error(f"Strip failed for {strip_abs_path}: {e.stderr.decode()}")
             # 修改 paths.json 文件
-            strip_rel_path = os.path.relpath(strip_path, pkg_info["binary_path"])
-            paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
+            strip_rel_path = os.path.relpath(strip_abs_path, pkg_info["binary_path"])
             updated = False
             for item in paths_json_data["paths"]:
                 if item.get("_path") == strip_rel_path:
                     # 大小和 sha256 需要更新
                     item.update(
                         {
-                            "sha256": hash_files([strip_abs_path]),
+                            "sha256": hash_files([strip_abs_path], algorithm="sha256"),
                             "size_in_bytes": os.path.getsize(strip_abs_path),
                         }
                     )
@@ -730,13 +723,15 @@ class Modify:
                     break
             if not updated:
                 logger.warning(f"paths.json missing entry for {strip_rel_path}")
-            paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
-            with open(paths_json_path, "w", encoding="utf-8") as fout:
-                fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
+
+        paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
+        with open(paths_json_path, "w", encoding="utf-8") as fout:
+            fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
 
 
 def main() -> None:
     """主逻辑实现"""
+    setup_logging(120)
     args = parse_args()
     instance = Modify(args)
     instance.run()

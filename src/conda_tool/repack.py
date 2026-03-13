@@ -14,7 +14,6 @@ try:
 except ImportError:
     from conda_tool.utils import abs_path, hash_files, setup_logging
 
-setup_logging(120)
 logger = getLogger("conda_tool.repack")
 
 
@@ -143,6 +142,7 @@ def repack_sh_package(original_sh: str, work_dir: str, output_path: str) -> None
 
 def main() -> None:
     """Main function"""
+    setup_logging(120)
     args = parse_args()
 
     # Create a temporary directory

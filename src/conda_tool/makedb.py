@@ -27,7 +27,6 @@ except ImportError:
     from conda_tool.utils import SCRIPT_DIR, setup_logging
 
 
-setup_logging(120)
 logger = getLogger("conda_tool.makedb")
 
 
@@ -332,6 +331,7 @@ async def async_main() -> None:
 
 def main() -> None:
     """同步入口函数"""
+    setup_logging(120)
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:

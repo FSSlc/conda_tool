@@ -11,8 +11,11 @@ import tarfile
 import tempfile
 import textwrap
 from collections.abc import Sized
+from logging import getLogger
 
 import zstandard
+
+logger = getLogger("conda_tool.utils")
 
 SCRIPT_DIR = os.getcwd()
 TEXT_WIDTH = 78
@@ -159,7 +162,7 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
                         else:
                             tar.extract(member, out_path, set_attrs=False)
                     except OSError as e:
-                        print(f"Warning: Failed to extract {member.name}: {str(e)}")
+                        logger.warning(f"Failed to extract {member.name}: {e}")
                         continue
         else:
             shutil.unpack_archive(archive, out_path)
@@ -167,7 +170,9 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
         raise ValueError(f"Unknown format {fmt} to extract.")
 
 
-def extract_large_tar(tar_path, extract_path, chunk_size=8192, debug=False):
+def extract_large_tar(
+    tar_path: str, extract_path: str, chunk_size: int = 8192, debug: bool = False
+) -> None:
     """高效解压大型 tar 文件的函数"""
     try:
         os.makedirs(extract_path, exist_ok=True)
@@ -188,11 +193,11 @@ def extract_large_tar(tar_path, extract_path, chunk_size=8192, debug=False):
                         or member.islnk()
                     ):
                         if debug:
-                            print(f"警告：跳过可疑条目 {member.name}")
+                            logger.warning(f"跳过可疑条目 {member.name}")
                         continue
 
                     if debug:
-                        print(
+                        logger.debug(
                             f"进度：{index:03d}/{total_files:03d} ({(index / total_files) * 100:06.2f}%)"
                             + f" - {member.name}"
                         )
@@ -224,14 +229,15 @@ def extract_large_tar(tar_path, extract_path, chunk_size=8192, debug=False):
                     # 定期进行垃圾回收
                     if index % 100 == 0:
                         gc.collect()
-                except Exception as e:
-                    print(f"警告：解压文件 {member.name} 时出错：{str(e)}")
+                except (OSError, tarfile.TarError) as e:
+                    logger.warning(f"解压文件 {member.name} 时出错：{e}")
                     continue
         if debug:
-            print("解压完成！")
+            logger.debug("解压完成！")
 
-    except Exception as e:
-        print(f"错误：{str(e)}")
+    except (tarfile.TarError, OSError) as e:
+        logger.error(f"错误：{str(e)}")
+        raise
 
 
 @contextlib.contextmanager

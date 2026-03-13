@@ -13,16 +13,15 @@ import urllib.request
 from concurrent.futures.process import ProcessPoolExecutor
 from logging import getLogger
 from multiprocessing import Manager
-from re import Match
-from typing import Literal, TypedDict, cast
+from typing import TypedDict, cast
 
 import msgpack
-import ruamel.yaml
 import zstandard
 from colorama import Fore, Style
 from packaging.version import parse as PV
 
 try:
+    from .recipe import RecipeParser, SourceUrlSpec
     from .utils import (
         SCRIPT_DIR,
         abs_path,
@@ -32,6 +31,7 @@ try:
         setup_logging,
     )
 except ImportError:
+    from conda_tool.recipe import RecipeParser, SourceUrlSpec
     from conda_tool.utils import (
         SCRIPT_DIR,
         abs_path,
@@ -42,16 +42,9 @@ except ImportError:
     )
 
 
-setup_logging(120)
 logger = getLogger("conda_tool.dlpkg")
 
 fn_is_simple = re.compile(r"^v?\d+([\-.]\d+)+(\.\w+)+$").match
-url_p1 = re.compile(r"(^\s*-\s*)(.*)$")
-url_p2 = re.compile(r"(^\s*-?\s*url:\s*)(.*)$")
-url_p3 = re.compile(r"(^\s*-?\s*url:\s*)([^{]+)\{\{.*\}\}([^}]+)$")
-
-HashType = Literal["md5", "sha1", "sha256"]
-PackageUrl = str | list[str]
 
 
 class PackageSpec(TypedDict):
@@ -65,16 +58,8 @@ class PackageSpec(TypedDict):
     timestamp: int
 
 
-class SourceUrlSpec(TypedDict):
-    url: PackageUrl
-    hash_type: HashType | None
-    hash: str | None
-    fn: str | None
-
-
 DownloadTask = tuple[SourceUrlSpec, str | None, str]
 RecipePaths = tuple[str, str, str, str]
-UrlBlock = list[int]
 
 
 def url_basename(url: str) -> str:
@@ -325,7 +310,7 @@ class DownloadPkg:
             f"!! Please check if all the following dependencies are built: {Style.RESET_ALL}"
         )
 
-        deps = self.extract_reqs(os.path.join(new_recipe, "meta.yaml"))
+        deps = self.extract_reqs(meta_yaml)
         logger.info("-" * 80)
         logger.info(deps)
         logger.info("-" * 80)
@@ -454,207 +439,82 @@ class DownloadPkg:
             )
             real_recipe = os.path.join(old_recipe, "parent")
             shutil.copytree(real_recipe, new_recipe)
-            meta_yaml = os.path.join(old_recipe, "meta.yaml")
-            meta_yaml_tpl = os.path.join(new_recipe, "meta.yaml")
+            # multi-output: recipe 直接作为模板使用
+            recipe_file, recipe_tpl = self._find_recipe_file(
+                old_recipe, new_recipe, is_parent=True
+            )
         else:
             logger.info(f">> Copying recipe to {new_recipe} ...")
             shutil.copytree(old_recipe, new_recipe)
             conda_build_cfg = os.path.join(new_recipe, "conda_build_config.yaml")
-            meta_yaml = os.path.join(new_recipe, "meta.yaml")
-            meta_yaml_tpl = os.path.join(new_recipe, "meta.yaml.template")
             if os.path.exists(conda_build_cfg):
                 logger.info(f">> Removing redundant {conda_build_cfg} ...")
                 os.remove(conda_build_cfg)
+            recipe_file, recipe_tpl = self._find_recipe_file(
+                new_recipe, new_recipe, is_parent=False
+            )
         logger.info(f">> Downloading packages to {self.pkgs_dir} ...")
-        return old_recipe, new_recipe, meta_yaml, meta_yaml_tpl
+        return old_recipe, new_recipe, recipe_file, recipe_tpl
 
     @staticmethod
-    def load_urls(meta_yaml: str) -> list[SourceUrlSpec]:
-        """从 meta.yaml 中获取可下载的所有 url 地址"""
-        loader = ruamel.yaml.YAML()
-        with open(meta_yaml, encoding="utf8") as f:
-            meta = loader.load(f)
-        result: list[SourceUrlSpec] = []
-        if "source" not in meta:
-            return []
-        sources = meta["source"]
-        if not isinstance(sources, list):
-            sources = [sources]
-        for item in sources:
-            # 当前只支持下载 url 类型的来源
-            if "url" not in item:
-                logger.warning(
-                    f"{Fore.YELLOW}Not supporting source type for {item}{Style.RESET_ALL}"
-                )
-                continue
-            url = item["url"]
-            hash_type: HashType | None = None
-            file_hash = None
-            for ht in ["md5", "sha1", "sha256"]:
-                if ht in item:
-                    hash_type = ht  # type: ignore
-                    break
-            if hash_type is not None:
-                file_hash = item[hash_type]
-            fn = item.get("fn", None)
-            result.append(
-                SourceUrlSpec(url=url, hash_type=hash_type, hash=file_hash, fn=fn)
+    def _find_recipe_file(
+        source_dir: str, dest_dir: str, *, is_parent: bool
+    ) -> tuple[str, str]:
+        """在 recipe 目录中查找 recipe.yaml 或 meta.yaml，返回 (recipe_file, recipe_tpl)"""
+        recipe_yaml = os.path.join(dest_dir, "recipe.yaml")
+        meta_yaml = os.path.join(dest_dir, "meta.yaml")
+        if os.path.exists(recipe_yaml):
+            if is_parent:
+                return os.path.join(source_dir, "recipe.yaml"), recipe_yaml
+            return recipe_yaml, recipe_yaml + ".template"
+        if is_parent:
+            return os.path.join(source_dir, "meta.yaml"), meta_yaml
+        return meta_yaml, meta_yaml + ".template"
+
+    @staticmethod
+    def load_urls(recipe_path: str) -> list[SourceUrlSpec]:
+        """从 recipe (meta.yaml 或 recipe.yaml) 中获取可下载的所有 url 地址"""
+        parser = RecipeParser(recipe_path)
+        # RecipeParser.load_urls 返回的是 recipe.SourceUrlSpec，
+        # 结构与 dlpkg.SourceUrlSpec 一致，直接转换
+        return [
+            SourceUrlSpec(
+                url=spec["url"],
+                hash_type=spec["hash_type"],
+                hash=spec["hash"],
+                fn=spec["fn"],
             )
-        return result
+            for spec in parser.load_urls()
+        ]
 
-    def replace_urls(self, meta_yaml_tpl: str, url_specs: list[SourceUrlSpec]) -> None:
-        """替换 meta.yaml 中 url 地址"""
-        with open(meta_yaml_tpl, encoding="utf-8") as f:
-            content = f.read().split("\n")
-        url_blocks = self.get_url_block(content)
-        if len(url_blocks) > 0:
-            new_contents = self.get_new_contents(
-                content, url_blocks, url_specs, meta_yaml_tpl
-            )
-            with open(meta_yaml_tpl, "w", encoding="utf8") as f:
-                f.write("\n".join(new_contents))
+    def replace_urls(self, recipe_tpl: str, url_specs: list[SourceUrlSpec]) -> None:
+        """替换 recipe 中 url 地址（支持 meta.yaml 和 recipe.yaml）"""
+        parser = RecipeParser(recipe_tpl)
+        url_mapping: dict[int, str] = {}
+        for idx, url_spec in enumerate(url_specs):
+            fn = url_spec.get("fn")
+            if fn is None:
+                url = url_spec["url"]
+                fn = url_basename(url[0] if isinstance(url, list) else url)
+            fn = str(fn)
+            fn = f"{self.args.PKGNAME}-{fn}" if fn_is_simple(fn) else fn
+            pkg_path = os.path.join(self.pkgs_dir, fn)
+            pkg_path = os.path.relpath(pkg_path, os.path.dirname(recipe_tpl))
+            url_mapping[idx] = pkg_path
 
-    @staticmethod
-    def get_url_block(content: list[str]) -> list[UrlBlock]:
-        """获取 meta 中关于 url 的那些行的范围"""
-        url_blocks = []
-        for ln, line in enumerate(content):
-            m = url_p2.match(line)
-            if not m:
-                continue
-            if "://" in line:
-                url_blocks.append([ln, ln + 1])
-            else:
-                cln = ln
-                while cln + 1 < len(content):
-                    next_line = content[cln + 1]
-                    if not (next_line.strip() == "" or "://" in next_line):
-                        break
-                    cln += 1
-                url_blocks.append([ln, cln + 1])
-        return url_blocks
-
-    def get_new_contents(
-        self,
-        content: list[str],
-        url_blocks: list[UrlBlock],
-        url_specs: list[SourceUrlSpec],
-        meta_yaml_tpl: str,
-    ) -> list[str]:
-        """生成新的 meta.yaml 内容"""
-        new_contents = content[0 : url_blocks[0][0]]
-        for idx, block in enumerate(url_blocks):
-            block_content = content[block[0] : block[1]]
-
-            m, new_url, match_url_spec = self.get_new_url(block_content, url_specs)
-            if match_url_spec is not None:
-                fn = os.path.basename(urllib.parse.urlparse(new_url).path)
-                if match_url_spec.get("fn") is not None:
-                    fn = cast(str, match_url_spec.get("fn"))
-                fn = str(fn)
-                fn = f"{self.args.PKGNAME}-{fn}" if fn_is_simple(fn) else fn
-                pkg_path = os.path.join(self.pkgs_dir, fn)
-                pkg_path = os.path.relpath(pkg_path, os.path.dirname(meta_yaml_tpl))
-                if len(block_content) == 1 and m is not None:
-                    new_contents.append(m.group(1) + pkg_path)
-                    # 原有的 source 加上注释
-                    comment_block_content = "#" + block_content[0]
-                    new_contents.append(comment_block_content)
-                else:
-                    new_contents.append(block_content[0] + " " + pkg_path)
-                    # 原有的 source 加上注释
-                    comment_block_content = ["#" + line for line in block_content]
-                    new_contents.extend(comment_block_content)
-            else:
-                new_contents.extend(block_content)
-            if idx != (len(url_blocks) - 1):
-                # pylint: disable-next=unnecessary-list-index-lookup
-                new_contents += content[url_blocks[idx][1] : url_blocks[idx + 1][0]]
-        new_contents += content[url_blocks[-1][1] :]
-        return new_contents
+        new_content = parser.replace_source_urls(url_mapping)
+        parser.save(recipe_tpl, new_content)
 
     @staticmethod
-    def get_new_url(
-        block_content: list[str], url_specs: list[SourceUrlSpec]
-    ) -> tuple[Match[str] | None, str | None, SourceUrlSpec | None]:
-        """得到新的 url 地址"""
-        change_line = ""
-        if len(block_content) == 1:
-            change_line = block_content[0]
-        else:
-            for line in block_content:
-                if "://" in line:
-                    change_line = line
-                    break
-                continue
-        if "{{" in change_line:
-            if len(block_content) == 1:
-                m = url_p3.match(change_line)
-            else:
-                m = url_p1.match(change_line)
-            if m is None:
-                return None, None, None
-            new_url_pattern = re.escape(m.group(2)) + r".*" + re.escape(m.group(3))
-        else:
-            if len(block_content) == 1:
-                m = url_p2.match(change_line)
-            else:
-                m = url_p1.match(change_line)
-            if m is None:
-                return None, None, None
-            new_url_pattern = re.escape(m.group(2))
-
-        new_url, match_url_spec = None, None
-
-        for url_spec in url_specs:
-            if new_url is None:
-                url: list[str] | str = url_spec.get("url")
-                if not isinstance(url, list):
-                    urls = [url]
-                else:
-                    urls = url
-                for u in urls:
-                    if re.match(new_url_pattern, u):
-                        new_url = u
-                        match_url_spec = url_spec
-                        break
-        return m, new_url, match_url_spec
-
-    @staticmethod
-    def extract_reqs(meta_yaml: str) -> str:
-        """从 meta.yaml 中找出所依赖的包列表"""
-        with open(meta_yaml, encoding="utf-8") as f:
-            content = f.read().split("\n")
-        keys = ("host:", "run:", "build:", "run_constrained:")
-        in_req = False
-        result = []
-        for line in content:
-            line = line.strip()
-            if not line:
-                continue
-            if not in_req:
-                if not line.startswith("requirements:"):
-                    continue
-                in_req = True
-                result.append(line)
-            else:
-                if line.startswith("#"):
-                    continue
-                if line.startswith("{"):
-                    result.append(line)
-                    continue
-                if line.startswith("-"):
-                    result.append(line)
-                    continue
-                if line.endswith(":") and line not in keys:
-                    in_req = False
-                    continue
-                result.append(line)
-        return "\n".join(result)
+    def extract_reqs(recipe_path: str) -> str:
+        """从 recipe (meta.yaml 或 recipe.yaml) 中找出所依赖的包列表"""
+        parser = RecipeParser(recipe_path)
+        return parser.extract_reqs()
 
 
 def main() -> None:
     """函数主流程"""
+    setup_logging(120)
     args = parse_args()
     downloader = DownloadPkg(args)
     downloader.run()

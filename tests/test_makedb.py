@@ -53,14 +53,12 @@ class ParseRepodataTests(unittest.IsolatedAsyncioTestCase):
                 asyncio.Semaphore(2),
             )
 
-        self.assertEqual(mocked_save.await_count, 2)
-        self.assertEqual(set(saved_packages), {"foo", "bar"})
-        self.assertEqual(
-            {item["version"] for item in saved_packages["foo"]}, {"1.0", "1.1"}
-        )
-        self.assertEqual(
-            saved_packages["bar"][0]["url"],
-            "https://conda.anaconda.org/conda-forge/noarch/bar-2.0-0.conda",
+        assert mocked_save.await_count == 2
+        assert set(saved_packages) == {"foo", "bar"}
+        assert {item["version"] for item in saved_packages["foo"]} == {"1.0", "1.1"}
+        assert (
+            saved_packages["bar"][0]["url"]
+            == "https://conda.anaconda.org/conda-forge/noarch/bar-2.0-0.conda"
         )
 
     async def test_parse_repodata_preserves_same_filename_from_multiple_arches(self) -> None:
@@ -105,17 +103,13 @@ class ParseRepodataTests(unittest.IsolatedAsyncioTestCase):
                 asyncio.Semaphore(2),
             )
 
-        self.assertEqual(len(saved_packages["shared"]), 2)
-        self.assertEqual(
-            {item["subdir"] for item in saved_packages["shared"]},
-            {"linux-64", "noarch"},
-        )
+        assert len(saved_packages["shared"]) == 2
+        assert {item["subdir"] for item in saved_packages["shared"]} == {
+            "linux-64",
+            "noarch",
+        }
 
 
-class LoggingTests(unittest.TestCase):
+class LoggingTests:
     def test_module_logger_uses_conda_tool_namespace(self) -> None:
-        self.assertEqual(makedb.logger.name, "conda_tool.makedb")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert makedb.logger.name == "conda_tool.makedb"

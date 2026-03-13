@@ -14,12 +14,7 @@ TOOLS: dict[str, str] = {
 }
 
 
-def forward_args(args: list[str]) -> list[str]:
-    """正确处理带空格的参数引用"""
-    return [arg if " " not in arg else f'"{arg}"' for arg in args]
-
-
-def main():
+def main() -> None:
     # 主解析器（禁用自动帮助生成，我们自己处理）
     main_parser = argparse.ArgumentParser(
         description="Conda Tool - A Swiss Army knife for conda packages", add_help=False

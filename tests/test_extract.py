@@ -2,15 +2,16 @@ import os
 import sys
 import tarfile
 import tempfile
-import unittest
 from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from conda_tool.extract import Extractor, parse_args, parse_sh
 
 
-class ParseArgsTests(unittest.TestCase):
+class ParseArgsTests:
     def test_clean_recreates_output_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -35,10 +36,10 @@ class ParseArgsTests(unittest.TestCase):
             ):
                 args = parse_args()
 
-            self.assertEqual(args.source, os.path.abspath(source_path))
-            self.assertEqual(args.output, os.path.abspath(output_dir))
-            self.assertTrue(output_dir.is_dir())
-            self.assertFalse(stale_file.exists())
+            assert args.source == os.path.abspath(source_path)
+            assert args.output == os.path.abspath(output_dir)
+            assert output_dir.is_dir()
+            assert not stale_file.exists()
 
     def test_rejects_output_path_that_is_not_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,11 +60,11 @@ class ParseArgsTests(unittest.TestCase):
                     str(output_file),
                 ],
             ):
-                with self.assertRaises(SystemExit):
+                with pytest.raises(SystemExit):
                     parse_args()
 
 
-class ParseShTests(unittest.TestCase):
+class ParseShTests:
     def test_parse_old_mode_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_path = Path(tmp) / "old.sh"
@@ -83,13 +84,13 @@ class ParseShTests(unittest.TestCase):
 
             sh_data = parse_sh(str(source_path), output_msg=False)
 
-            self.assertTrue(sh_data["old_mode"])
-            self.assertEqual(sh_data["name"], b"demo")
-            self.assertEqual(sh_data["version"], b"1.0")
-            self.assertEqual(sh_data["platform"], b"linux-64")
-            self.assertEqual(sh_data["pkgs_data"], payload)
-            self.assertEqual(sh_data["conda_exec_data"], b"")
-            self.assertEqual(sh_data["script_data"], content[:-len(payload)])
+            assert sh_data["old_mode"]
+            assert sh_data["name"] == b"demo"
+            assert sh_data["version"] == b"1.0"
+            assert sh_data["platform"] == b"linux-64"
+            assert sh_data["pkgs_data"] == payload
+            assert sh_data["conda_exec_data"] == b""
+            assert sh_data["script_data"] == content[:-len(payload)]
 
     def test_parse_new_mode_payload_and_conda_exec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -110,17 +111,17 @@ class ParseShTests(unittest.TestCase):
 
             sh_data = parse_sh(str(source_path), output_msg=False)
 
-            self.assertFalse(sh_data["old_mode"])
-            self.assertEqual(sh_data["conda_exec_data"], conda_exec)
-            self.assertEqual(sh_data["pkgs_data"], payload)
-            self.assertEqual(sh_data["script_data"], header)
+            assert not sh_data["old_mode"]
+            assert sh_data["conda_exec_data"] == conda_exec
+            assert sh_data["pkgs_data"] == payload
+            assert sh_data["script_data"] == header
 
     def test_parse_sh_requires_header_terminator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_path = Path(tmp) / "broken.sh"
             source_path.write_bytes(b"#!/bin/sh\n# NAME:  demo\n")
 
-            with self.assertRaisesRegex(ValueError, "未找到 header 结束标记"):
+            with pytest.raises(ValueError, match="未找到 header 结束标记"):
                 parse_sh(str(source_path), output_msg=False)
 
     def test_parse_sh_requires_boundaries_for_new_mode(self) -> None:
@@ -136,11 +137,11 @@ class ParseShTests(unittest.TestCase):
                 b"payload"
             )
 
-            with self.assertRaisesRegex(ValueError, "缺少 boundary 信息"):
+            with pytest.raises(ValueError, match="缺少 boundary 信息"):
                 parse_sh(str(source_path), output_msg=False)
 
 
-class MakeRepoTests(unittest.TestCase):
+class MakeRepoTests:
     def make_extractor(self, output_dir: Path) -> Extractor:
         return Extractor(
             Namespace(
@@ -169,11 +170,9 @@ class MakeRepoTests(unittest.TestCase):
             extractor = self.make_extractor(tmp_path)
             extractor.make_repo(str(conda_pkgs_dir), str(pkgs_output_dir))
 
-            self.assertTrue(
-                (conda_pkgs_dir / "linux-64" / "foo-1.0-0.tar.bz2").exists()
-            )
-            self.assertTrue((conda_pkgs_dir / "noarch" / "bar-1.0-0.conda").exists())
-            self.assertTrue((conda_pkgs_dir / "unknown-1.0-0.conda").exists())
+            assert (conda_pkgs_dir / "linux-64" / "foo-1.0-0.tar.bz2").exists()
+            assert (conda_pkgs_dir / "noarch" / "bar-1.0-0.conda").exists()
+            assert (conda_pkgs_dir / "unknown-1.0-0.conda").exists()
 
     def test_make_repo_extracts_preconda_tar_when_urls_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,8 +198,8 @@ class MakeRepoTests(unittest.TestCase):
             extractor = self.make_extractor(tmp_path)
             extractor.make_repo(str(conda_pkgs_dir), str(pkgs_output_dir))
 
-            self.assertTrue((conda_pkgs_dir / "linux-64" / package_name).exists())
-            self.assertFalse((pkgs_output_dir / "preconda").exists())
+            assert (conda_pkgs_dir / "linux-64" / package_name).exists()
+            assert not (pkgs_output_dir / "preconda").exists()
 
     def test_make_repo_requires_metadata_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,9 +210,5 @@ class MakeRepoTests(unittest.TestCase):
 
             extractor = self.make_extractor(tmp_path)
 
-            with self.assertRaisesRegex(FileNotFoundError, "urls.txt 或 preconda.tar.bz2"):
+            with pytest.raises(FileNotFoundError, match="urls.txt 或 preconda.tar.bz2"):
                 extractor.make_repo(str(conda_pkgs_dir), str(pkgs_output_dir))
-
-
-if __name__ == "__main__":
-    unittest.main()
