@@ -56,7 +56,7 @@ CHUNK_SIZE = 8192 * 8
 
 EXAMPLE_DATA = {
     "conda": {
-        "add": {"extract.py": "bin", "../src/conda_tool/*": "bin"},
+        "add": {"extract.py": "bin/", "./src/conda_tool/*": "bin/"},
         "mv": {"bin/conda": "bin/_conda"},
         "delete": ["etc/fish", "xonsh"],
     }

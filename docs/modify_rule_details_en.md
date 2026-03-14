@@ -26,7 +26,7 @@ Full example:
     "add": {
       "/xxx/conda_tool/dist/conda_tool-0.1.0-py3-none-any.whl": "bin/",
       "/xxx/conda_tool/.vscode/": "share/",
-      "../../src/conda_tool/*": "bin/"
+      "./src/conda_tool/*": "bin/"
     },
     "mv": {
       "bin/conda": "bin/_conda",
