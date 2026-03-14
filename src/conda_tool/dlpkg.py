@@ -21,7 +21,7 @@ from colorama import Fore, Style
 from packaging.version import parse as PV
 
 try:
-    from .recipe import RecipeParser, SourceUrlSpec
+    from .recipe import RecipeFormat, RecipeParser, SourceUrlSpec
     from .utils import (
         SCRIPT_DIR,
         abs_path,
@@ -31,7 +31,7 @@ try:
         setup_logging,
     )
 except ImportError:
-    from conda_tool.recipe import RecipeParser, SourceUrlSpec
+    from conda_tool.recipe import RecipeFormat, RecipeParser, SourceUrlSpec
     from conda_tool.utils import (
         SCRIPT_DIR,
         abs_path,
@@ -297,8 +297,6 @@ class DownloadPkg:
         if os.path.exists(os.path.join(old_recipe, "parent")):
             logger.info(f">> Created feedstock for {pkg!r} at {new_recipe}.")
         else:
-            os.remove(meta_yaml)
-            shutil.move(meta_yaml_tpl, meta_yaml)
             logger.info(
                 f"{Fore.GREEN}>> Created feedstock for {pkg!r} "
                 + f"at {new_recipe}.{Style.RESET_ALL}"
@@ -311,6 +309,10 @@ class DownloadPkg:
         )
 
         deps = self.extract_reqs(meta_yaml)
+        os.remove(meta_yaml)
+        if self.recipe_format == RecipeFormat.META_YAML:
+            shutil.move(meta_yaml_tpl, meta_yaml)
+
         logger.info("-" * 80)
         logger.info(deps)
         logger.info("-" * 80)
@@ -446,13 +448,18 @@ class DownloadPkg:
         else:
             logger.info(f">> Copying recipe to {new_recipe} ...")
             shutil.copytree(old_recipe, new_recipe)
-            conda_build_cfg = os.path.join(new_recipe, "conda_build_config.yaml")
-            if os.path.exists(conda_build_cfg):
-                logger.info(f">> Removing redundant {conda_build_cfg} ...")
-                os.remove(conda_build_cfg)
+            for redundant_file in ["conda_build_config.yaml", "variant_config.yaml"]:
+                conda_build_cfg = os.path.join(new_recipe, redundant_file)
+                if os.path.exists(conda_build_cfg):
+                    logger.info(f">> Removing redundant {conda_build_cfg} ...")
+                    os.remove(conda_build_cfg)
             recipe_file, recipe_tpl = self._find_recipe_file(
                 new_recipe, new_recipe, is_parent=False
             )
+        if os.path.basename(recipe_file) == "meta.yaml":
+            self.recipe_format = RecipeFormat.META_YAML
+        else:
+            self.recipe_format = RecipeFormat.RECIPE_YAML
         logger.info(f">> Downloading packages to {self.pkgs_dir} ...")
         return old_recipe, new_recipe, recipe_file, recipe_tpl
 
@@ -464,9 +471,11 @@ class DownloadPkg:
         recipe_yaml = os.path.join(dest_dir, "recipe.yaml")
         meta_yaml = os.path.join(dest_dir, "meta.yaml")
         if os.path.exists(recipe_yaml):
+            dir_name, base_name = os.path.split(recipe_yaml)
+            rendered_recipe = os.path.join(dir_name, "rendered_" + base_name)
             if is_parent:
-                return os.path.join(source_dir, "recipe.yaml"), recipe_yaml
-            return recipe_yaml, recipe_yaml + ".template"
+                return rendered_recipe, os.path.join(source_dir, "recipe.yaml")
+            return rendered_recipe, recipe_yaml
         if is_parent:
             return os.path.join(source_dir, "meta.yaml"), meta_yaml
         return meta_yaml, meta_yaml + ".template"
@@ -475,8 +484,6 @@ class DownloadPkg:
     def load_urls(recipe_path: str) -> list[SourceUrlSpec]:
         """从 recipe (meta.yaml 或 recipe.yaml) 中获取可下载的所有 url 地址"""
         parser = RecipeParser(recipe_path)
-        # RecipeParser.load_urls 返回的是 recipe.SourceUrlSpec，
-        # 结构与 dlpkg.SourceUrlSpec 一致，直接转换
         return [
             SourceUrlSpec(
                 url=spec["url"],

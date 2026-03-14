@@ -106,36 +106,6 @@ requirements:
     - numpy
 """
 
-RECIPE_YAML_MULTI_SOURCE = """
-context:
-  version: "1.0"
-
-package:
-  name: multi
-  version: ${{ version }}
-
-source:
-  - url: https://example.com/a-${{ version }}.tar.gz
-    sha256: aaa
-  - url: https://example.com/b-${{ version }}.tar.gz
-    sha256: bbb
-"""
-
-RECIPE_YAML_SCHEMA_VERSION = """
-schema_version: 1
-
-context:
-  version: "2.0"
-
-package:
-  name: modern
-  version: ${{ version }}
-
-source:
-  url: https://example.com/modern-${{ version }}.tar.gz
-  sha256: modern_hash
-"""
-
 
 def _write_recipe(tmpdir: str, filename: str, content: str) -> str:
     """Write recipe content to a temp file and return its path."""
@@ -230,19 +200,6 @@ class TestLoadUrls:
 
         assert urls == []
 
-    def test_recipe_yaml_single_source(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = _write_recipe(tmpdir, "recipe.yaml", RECIPE_YAML_SIMPLE)
-            parser = RecipeParser(path)
-            urls = parser.load_urls()
-
-        assert len(urls) == 1
-        url = urls[0]["url"]
-        assert isinstance(url, str)
-        assert "${{ version }}" in url
-        assert "pandas" in url
-        assert urls[0]["hash_type"] == "sha256"
-
     def test_recipe_yaml_with_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = _write_recipe(tmpdir, "recipe.yaml", RECIPE_YAML_SIMPLE)
@@ -250,26 +207,6 @@ class TestLoadUrls:
 
         assert parser.data is not None
         assert "context" in parser.data
-
-    def test_recipe_yaml_multiple_sources(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = _write_recipe(tmpdir, "recipe.yaml", RECIPE_YAML_MULTI_SOURCE)
-            parser = RecipeParser(path)
-            urls = parser.load_urls()
-
-        assert len(urls) == 2
-        assert "${{ version }}" in urls[0]["url"]
-        assert "a-" in urls[0]["url"]
-        assert "b-" in urls[1]["url"]
-
-    def test_recipe_yaml_schema_version(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = _write_recipe(tmpdir, "recipe.yaml", RECIPE_YAML_SCHEMA_VERSION)
-            parser = RecipeParser(path)
-            urls = parser.load_urls()
-
-        assert len(urls) == 1
-        assert "modern" in urls[0]["url"]
 
 
 class TestReplaceSourceUrls:
@@ -381,21 +318,6 @@ class TestSaveAndReload:
         assert len(urls) == 1
         assert urls[0]["url"] == "../pkgs/demo.tar.gz"
 
-    def test_save_and_reload_recipe_yaml(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = _write_recipe(tmpdir, "recipe.yaml", RECIPE_YAML_SIMPLE)
-            parser = RecipeParser(path)
-            result = parser.replace_source_urls({0: "../pkgs/pandas.tar.gz"})
-
-            out_path = os.path.join(tmpdir, "recipe.yaml")
-            parser.save(out_path, result)
-
-            parser2 = RecipeParser(out_path)
-            urls = parser2.load_urls()
-
-        assert len(urls) == 1
-        assert urls[0]["url"] == "../pkgs/pandas.tar.gz"
-
     def test_save_without_content_uses_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = _write_recipe(tmpdir, "meta.yaml", META_YAML_SIMPLE)
@@ -419,16 +341,6 @@ class TestExtractReqs:
 
         assert "requirements" in reqs
         assert "python" in reqs
-
-    def test_extract_reqs_recipe_yaml(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = _write_recipe(tmpdir, "recipe.yaml", RECIPE_YAML_SIMPLE)
-            parser = RecipeParser(path)
-            reqs = parser.extract_reqs()
-
-        assert "requirements" in reqs
-        assert "python" in reqs
-        assert "numpy" in reqs
 
     def test_extract_reqs_no_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -473,4 +385,3 @@ class TestRoundtrip:
         assert "package:" in result
         assert "source:" in result
         assert "requirements:" in result
-

@@ -6,7 +6,6 @@ replacing template expressions with safe placeholders before YAML parsing.
 """
 
 import io
-import os
 import re
 from enum import Enum
 from logging import getLogger
@@ -43,7 +42,7 @@ class RecipeParser:
     _TEMPLATE_EXPR_RE = re.compile(r"\$\{\{.*?\}\}|\{\{.*?\}\}")
     # {% ... %} Jinja2 控制语句（整行）
     _JINJA2_STMT_RE = re.compile(r"^(\s*)\{%.*?%\}\s*$", re.MULTILINE)
-    # conda-build selector 注释, 如 # [win]
+    # conda-build selector 注释，如 # [win]
     _SELECTOR_RE = re.compile(r"#\s*\[.*?\]\s*$", re.MULTILINE)
 
     def __init__(self, recipe_path: str) -> None:
@@ -55,14 +54,17 @@ class RecipeParser:
         with open(recipe_path, encoding="utf-8") as f:
             self.raw_content = f.read()
 
-        sanitized = self._sanitize(self.raw_content)
         self._yaml = ruamel.yaml.YAML()
+        self._yaml.indent(mapping=2, sequence=2, offset=2)
         self._yaml.preserve_quotes = True
-        self.data = self._yaml.load(sanitized)
+        if self.format == RecipeFormat.META_YAML:
+            sanitized = self._sanitize(self.raw_content)
+            self.data = self._yaml.load(sanitized)
+        else:
+            self.data = self._yaml.load(self.raw_content)
 
     def _detect_format(self) -> RecipeFormat:
-        basename = os.path.basename(self.recipe_path)
-        if basename == "recipe.yaml":
+        if "recipe.yaml" in self.recipe_path:
             return RecipeFormat.RECIPE_YAML
         return RecipeFormat.META_YAML
 
@@ -73,36 +75,68 @@ class RecipeParser:
         self._counter += 1
         return key
 
-    def _comment_stmt(self, match: re.Match) -> str:
-        """将 {% %} 控制语句行转为 YAML 注释，同时保留原始文本为占位符"""
-        token = match.group(0)
-        indent = match.group(1)
-        key = f"__RECIPE_PH_{self._counter}__"
-        self._placeholders[key] = token.strip()
-        self._counter += 1
-        return f"{indent}# {key}"
-
     def _sanitize(self, content: str) -> str:
         """将模板语法替换为占位符，使内容成为合法 YAML"""
-        # 先处理 {% %} 语句行（整行变注释）
-        result = self._JINJA2_STMT_RE.sub(self._comment_stmt, content)
-        # 再处理 ${{ }} 和 {{ }} 表达式
+        # 为了使 YAML 解析器能够解析文件，我们需要将所有 Jinja2 语法转为占位符
+        # 但之后在输出时，要将 set 语句恢复为正常格式
+
+        # 首先处理整行的 Jinja2 语句（可能要特别处理 set 语句）
+        lines = content.splitlines()
+        temp_lines = []
+        for line_idx, line in enumerate(lines):
+            match = self._JINJA2_STMT_RE.match(line)
+            if match:
+                # 这是一整行的 Jinja2 语句
+                token = match.group(0).strip()
+                key = f"__JINJA2_STMT_{line_idx}__"
+                # 存储原始的 Jinja2 语句，以便在输出时决定如何恢复
+                self._placeholders[key] = token
+                indent = match.group(1)
+                # 在 YAML 解析阶段，将所有 Jinja2 语句替换为注释，以确保 YAML 解析成功
+                # 稍后在恢复时，我们会根据语句类型决定是否取消注释
+                temp_lines.append(f"{indent}# {key}")
+            else:
+                temp_lines.append(line)
+
+        # 对于 ${{ }} 和 {{ }} 表达式，替换为占位符
+        result = "\n".join(temp_lines)
         result = self._TEMPLATE_EXPR_RE.sub(self._make_placeholder, result)
         return result
 
     def _restore(self, content: str) -> str:
         """将占位符还原为原始模板语法"""
+        # 先替换表达式占位符（{{ }} 和 ${{ }}）
         for key, value in sorted(
             self._placeholders.items(), key=lambda kv: -len(kv[0])
         ):
-            content = content.replace(key, value)
+            # 如果是一个 Jinja2 语句的占位符
+            if key.startswith("__JINJA2_STMT_"):
+                # 识别是否是 set 语句
+                if "set " in value:
+                    # 是 set 语句，恢复为正常格式
+                    content = content.replace(f"# {key}", value)
+                else:
+                    # 是控制语句，保持为注释格式
+                    content = content.replace(f"# {key}", f"# {value}")
+            else:
+                # 普通表达式占位符，直接替换
+                content = content.replace(key, value)
         return content
 
     def load_urls(self) -> list[SourceUrlSpec]:
         """从 recipe 中提取所有 source URL"""
-        if self.data is None or "source" not in self.data:
+        if self.data is None:
             return []
-        sources = self.data["source"]
+        if self.format == RecipeFormat.META_YAML:
+            if "source" not in self.data:
+                return []
+            sources = self.data["source"]
+        else:
+            if "recipe" not in self.data:
+                return []
+            if "source" not in self.data["recipe"]:
+                return []
+            sources = self.data["recipe"]["source"]
         if not isinstance(sources, list):
             sources = [sources]
 
@@ -113,11 +147,17 @@ class RecipeParser:
                     logger.warning(f"Not supporting source type for {item}")
                 continue
             url = item["url"]
-            # 还原 URL 中的占位符
+            # 为了提取 URL 而不影响后续使用，我们先还原
+            # 但在返回 URL 之前，需要确保 urllib.parse 可以处理它
+            final_url: PackageUrl
             if isinstance(url, str):
-                url = self._restore(url)
+                # 如果需要处理 urllib.parse 中的问题，应该在使用 URL 时再处理
+                final_url = self._restore(url)
             elif isinstance(url, list):
-                url = [self._restore(str(u)) for u in url]
+                final_url = [self._restore(str(u)) for u in item["url"]]
+            else:
+                # 对于其他类型，直接使用原始值
+                final_url = url
 
             hash_type: HashType | None = None
             file_hash = None
@@ -131,7 +171,7 @@ class RecipeParser:
             if fn is not None:
                 fn = self._restore(str(fn))
             result.append(
-                SourceUrlSpec(url=url, hash_type=hash_type, hash=file_hash, fn=fn)
+                SourceUrlSpec(url=final_url, hash_type=hash_type, hash=file_hash, fn=fn)
             )
         return result
 
@@ -167,8 +207,14 @@ class RecipeParser:
             else:
                 comment = self._restore(str(old_url))
 
+            # 为新路径添加注释并替换 URL
             source["url"] = new_path
-            source.yaml_add_eol_comment(f"original: {comment}", "url")
+            # 为了确保字典对象支持注释功能，我们重新获取它
+            if hasattr(sources[idx], "yaml_add_eol_comment"):
+                sources[idx].yaml_add_eol_comment(f"original: {comment}", "url")
+            else:
+                # 如果对象不支持注释功能，则保留原始 URL 的注释信息
+                pass
 
         stream = io.StringIO()
         self._yaml.dump(self.data, stream)
@@ -186,10 +232,20 @@ class RecipeParser:
 
     def extract_reqs(self) -> str:
         """从 recipe 数据结构中提取 requirements 段"""
-        if self.data is None or "requirements" not in self.data:
+        if self.data is None :
             return ""
-        reqs = self.data["requirements"]
+        if self.format == RecipeFormat.META_YAML:
+            if "requirements" not in self.data:
+                return ""
+            reqs = self.data["requirements"]
+        else:
+            if "recipe" not in self.data:
+                return ""
+            if "requirements" not in self.data["recipe"]:
+                return ""
+            reqs = self.data["recipe"]["requirements"]
         stream = io.StringIO()
         yaml = ruamel.yaml.YAML()
+        yaml.indent(mapping=2, sequence=2, offset=2)
         yaml.dump({"requirements": reqs}, stream)
         return self._restore(stream.getvalue().strip())
