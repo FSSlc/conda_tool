@@ -121,15 +121,30 @@ def repack_sh_package(original_sh: str, work_dir: str, output_path: str) -> None
     os.chmod(tmp_output_path, 0o755)
 
     pkgs_tar_md5 = hash_files([modified_tar])
-    sh_size_str = str(os.path.getsize(tmp_output_path)).rjust(12)
 
     sh_datas = parse_sh(tmp_output_path, False)
     script_data: bytes = sh_datas["script_data"]
     old_md5: bytes = sh_datas["md5"]
     old_bytes: bytes = sh_datas["bytes"]
-    script_data = script_data.replace(old_md5, pkgs_tar_md5.encode("utf-8")).replace(
-        old_bytes, sh_size_str.encode("utf-8")
-    )
+
+    # Replace MD5 using full line prefix to avoid accidental matches
+    old_md5_line = b"# MD5:   " + old_md5
+    new_md5_line = b"# MD5:   " + pkgs_tar_md5.encode("utf-8")
+    script_data = script_data.replace(old_md5_line, new_md5_line)
+
+    # Replace BYTES using full line prefix and keep the same field width
+    # to avoid changing header length (which would invalidate the size)
+    if old_bytes:
+        old_bytes_line = b"# BYTES: " + old_bytes
+        # Calculate the total file size after header replacement
+        # Since we keep the same field width, the header length won't change
+        tmp_file_size = os.path.getsize(tmp_output_path)
+        new_bytes_val = str(tmp_file_size).encode("utf-8")
+        # Pad to the same width as old_bytes to keep header length stable
+        if len(new_bytes_val) < len(old_bytes):
+            new_bytes_val = new_bytes_val.rjust(len(old_bytes))
+        new_bytes_line = b"# BYTES: " + new_bytes_val
+        script_data = script_data.replace(old_bytes_line, new_bytes_line)
 
     with open(output_path, "wb") as f:
         f.write(script_data)
