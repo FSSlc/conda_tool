@@ -3,18 +3,17 @@
 """A tool to create a feedstock directly from a conda-forge package"""
 
 import argparse
+import asyncio
 import os
 import re
 import shutil
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
-from concurrent.futures.process import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
-from multiprocessing import Manager
 from typing import TypedDict, cast
 
+import aiohttp
 import msgpack
 import zstandard
 from colorama import Fore, Style
@@ -60,6 +59,16 @@ class PackageSpec(TypedDict):
 
 DownloadTask = tuple[SourceUrlSpec, str | None, str]
 RecipePaths = tuple[str, str, str, str]
+
+
+class PrefixShardInfo(TypedDict):
+    base_url: str
+    shards_base_url: str
+
+
+class PrefixShardIndex(TypedDict):
+    info: PrefixShardInfo
+    shards: dict[str, bytes]
 
 
 def url_basename(url: str) -> str:
@@ -108,6 +117,28 @@ def parse_args() -> argparse.Namespace:
         help="Package database file (default: %(default)s)",
     )
     parser.add_argument(
+        "--spec-source",
+        choices=["auto", "local", "prefix-shards", "prefix-dev"],
+        default="auto",
+        help="Package metadata source (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--prefix-dev-url",
+        default="https://prefix.dev",
+        help="prefix.dev base url (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--prefix-dev-channel",
+        default="conda-forge",
+        help="prefix.dev channel name (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--prefix-dev-timeout",
+        type=int,
+        default=30,
+        help="prefix.dev request timeout in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
         "--workdir",
         metavar="WORKDIR",
         default=f"{os.path.join(SCRIPT_DIR, 'workdir')}",
@@ -143,7 +174,8 @@ class DownloadPkg:
         self.pkg_name = self.args.PKGNAME
         self.pkgs_dir = self.args.pkgs_dir
         self.recipes_dir = self.args.recipes_dir
-        self.errors = Manager().list()
+        self.errors: list[str] = []
+        self._prefix_shard_index_cache: dict[str, PrefixShardIndex] = {}
 
     def run(self) -> None:
         """主要实现逻辑"""
@@ -158,25 +190,223 @@ class DownloadPkg:
                 logger.error(error)
             logger.error("-" * 80)
 
+    def load_pkg_specs_from_local_db(self) -> list[PackageSpec]:
+        """从本地 zstd/msgpack 数据库加载软件包信息。"""
+        spec_file = os.path.join(self.args.specs_dir, f"{self.pkg_name}.zstd")
+        if not os.path.exists(spec_file):
+            raise FileNotFoundError(spec_file)
+
+        dctx = zstandard.ZstdDecompressor()
+        with open(spec_file, "rb") as f:
+            return cast(list[PackageSpec], msgpack.loads(dctx.decompress(f.read())))
+
+    @staticmethod
+    def _decode_msgpack_zstd(payload: bytes) -> object:
+        """解码 prefix.dev 返回的 msgpack+zstd 数据。"""
+        dctx = zstandard.ZstdDecompressor()
+        return msgpack.loads(dctx.decompress(payload))
+
+    async def _read_url_bytes_async(self, url: str) -> bytes:
+        """异步读取远程字节内容。"""
+        timeout = aiohttp.ClientTimeout(total=self.args.prefix_dev_timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(url) as response:
+                response.raise_for_status()
+                return await response.read()
+
+    def _read_url_bytes(self, url: str) -> bytes:
+        """同步包装异步远程读取。"""
+        return asyncio.run(self._read_url_bytes_async(url))
+
+    def _prefix_platform_base_url(self, platform: str) -> str:
+        """构造 prefix.dev 某个平台目录的基础 URL。"""
+        return (
+            f"{self.args.prefix_dev_url.rstrip('/')}/"
+            f"{self.args.prefix_dev_channel}/{platform}/"
+        )
+
+    def _get_prefix_shard_index(self, platform: str) -> PrefixShardIndex:
+        """获取某个平台的 repodata shard 索引。"""
+        if platform in self._prefix_shard_index_cache:
+            return self._prefix_shard_index_cache[platform]
+
+        index_url = urllib.parse.urljoin(
+            self._prefix_platform_base_url(platform), "repodata_shards.msgpack.zst"
+        )
+        data = self._decode_msgpack_zstd(self._read_url_bytes(index_url))
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Invalid shard index payload for {platform}")
+
+        info = data.get("info")
+        shards = data.get("shards")
+        if not isinstance(info, dict) or not isinstance(shards, dict):
+            raise RuntimeError(f"Invalid shard index structure for {platform}")
+
+        base_url = info.get("base_url")
+        shards_base_url = info.get("shards_base_url")
+        if not isinstance(base_url, str) or not isinstance(shards_base_url, str):
+            raise RuntimeError(f"Invalid shard index metadata for {platform}")
+
+        shard_index: PrefixShardIndex = {
+            "info": {
+                "base_url": base_url,
+                "shards_base_url": shards_base_url,
+            },
+            "shards": {
+                pkg_name: digest
+                for pkg_name, digest in shards.items()
+                if isinstance(pkg_name, str) and isinstance(digest, bytes)
+            },
+        }
+        self._prefix_shard_index_cache[platform] = shard_index
+        return shard_index
+
+    @staticmethod
+    def _normalize_digest_hex(digest: object) -> str:
+        """将 msgpack 中的 bytes digest 规范化为十六进制字符串。"""
+        if isinstance(digest, (bytes, bytearray, memoryview)):
+            return bytes(digest).hex()
+        if isinstance(digest, str):
+            return digest
+        raise RuntimeError(f"Unsupported digest type: {type(digest)!r}")
+
+    @staticmethod
+    def _normalize_md5(md5: object) -> str:
+        """将记录中的 md5 规范化为字符串。"""
+        if isinstance(md5, (bytes, bytearray, memoryview)):
+            return bytes(md5).hex()
+        if isinstance(md5, str):
+            return md5
+        return ""
+
+    @staticmethod
+    def _normalize_timestamp(timestamp: object) -> int:
+        """将记录中的 timestamp 规范化为整数。"""
+        if isinstance(timestamp, int):
+            return timestamp
+        return 0
+
+    def _fetch_prefix_shard_specs(self, platform: str) -> list[PackageSpec]:
+        """从 prefix.dev repodata shards 获取某个平台的包规格。"""
+        shard_index = self._get_prefix_shard_index(platform)
+        shard_digest = shard_index["shards"].get(self.pkg_name)
+        if shard_digest is None:
+            return []
+
+        shard_base_url = urllib.parse.urljoin(
+            urllib.parse.urljoin(
+                self._prefix_platform_base_url(platform), "repodata_shards.msgpack.zst"
+            ),
+            shard_index["info"]["shards_base_url"],
+        )
+        shard_url = urllib.parse.urljoin(
+            shard_base_url, f"{self._normalize_digest_hex(shard_digest)}.msgpack.zst"
+        )
+        shard_payload = self._decode_msgpack_zstd(self._read_url_bytes(shard_url))
+        if not isinstance(shard_payload, dict):
+            raise RuntimeError(
+                f"Invalid shard payload for {self.pkg_name} on {platform}"
+            )
+
+        base_url = urllib.parse.urljoin(
+            self._prefix_platform_base_url(platform), shard_index["info"]["base_url"]
+        )
+        records: dict[str, object] = {}
+        for section_name in ("packages", "packages.conda"):
+            section = shard_payload.get(section_name, {})
+            if isinstance(section, dict):
+                records.update(section)
+
+        pkg_specs: list[PackageSpec] = []
+        for filename, record in records.items():
+            if not isinstance(filename, str) or not isinstance(record, dict):
+                continue
+
+            name = record.get("name")
+            version = record.get("version")
+            build = record.get("build")
+            subdir = record.get("subdir")
+            if not all(
+                isinstance(item, str) for item in [name, version, build, subdir]
+            ):
+                continue
+            if name != self.pkg_name:
+                continue
+
+            md5 = self._normalize_md5(record.get("md5"))
+            if not md5:
+                continue
+
+            pkg_specs.append(
+                {
+                    "name": str(name),
+                    "version": str(version),
+                    "nv": f"{name}-{version}",
+                    "md5": str(md5),
+                    "build": str(build),
+                    "subdir": str(subdir),
+                    "url": urllib.parse.urljoin(base_url.rstrip("/") + "/", filename),
+                    "timestamp": self._normalize_timestamp(record.get("timestamp")),
+                }
+            )
+        return pkg_specs
+    def load_pkg_specs_from_prefix_shards(self) -> list[PackageSpec]:
+        """从 prefix.dev repodata shards 在线加载软件包信息。"""
+        platforms = [self.args.subdir]
+        if self.args.subdir != "noarch":
+            platforms.append("noarch")
+
+        pkg_specs: list[PackageSpec] = []
+        seen_urls: set[str] = set()
+        with ThreadPoolExecutor(max_workers=len(platforms)) as pool:
+            for platform_specs in pool.map(self._fetch_prefix_shard_specs, platforms):
+                for spec in platform_specs:
+                    if spec["url"] in seen_urls:
+                        continue
+                    seen_urls.add(spec["url"])
+                    pkg_specs.append(spec)
+        return pkg_specs
+
+    def load_pkg_specs(self) -> list[PackageSpec]:
+        """按配置加载软件包信息。"""
+        source = (
+            "prefix-shards"
+            if self.args.spec_source == "prefix-dev"
+            else self.args.spec_source
+        )
+        if source == "local":
+            return self.load_pkg_specs_from_local_db()
+        if source == "prefix-shards":
+            return self.load_pkg_specs_from_prefix_shards()
+
+        try:
+            pkg_specs = self.load_pkg_specs_from_prefix_shards()
+            if pkg_specs:
+                return pkg_specs
+            logger.warning(
+                f"{Fore.YELLOW}>> prefix.dev returned no shard records for {self.pkg_name}, "
+                f"falling back to local database.{Style.RESET_ALL}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"{Fore.YELLOW}>> Failed to query prefix.dev shards for {self.pkg_name}: "
+                f"{e}. Falling back to local database.{Style.RESET_ALL}"
+            )
+        return self.load_pkg_specs_from_local_db()
+
     def get_pkg_spec(self) -> PackageSpec:
         """获取软件包的信息"""
         py = self.args.py
         ver = self.args.upper_bound
 
-        spec_file = os.path.join(self.args.specs_dir, f"{self.pkg_name}.zstd")
-        if not os.path.exists(spec_file):
+        try:
+            pkg_specs = self.load_pkg_specs()
+        except FileNotFoundError:
             logger.error(
                 f"{Fore.RED}oo Requested package {self.pkg_name}"
                 + f" is not in database{Style.RESET_ALL}"
             )
             sys.exit(1)
-
-        pkg_specs: list[PackageSpec] = []
-        dctx = zstandard.ZstdDecompressor()
-        with open(spec_file, "rb") as f:
-            pkg_specs = cast(
-                list[PackageSpec], msgpack.loads(dctx.decompress(f.read()))
-            )
 
         if not pkg_specs:
             logger.error(
@@ -287,7 +517,8 @@ class DownloadPkg:
             )
         )
 
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+        max_workers = min(32, (os.cpu_count() or 1) + 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             list(pool.map(self.download_file, para_pairs))
 
         logger.info(
@@ -388,27 +619,34 @@ class DownloadPkg:
     def download(url: str, fn: str) -> bool | Exception:
         """下载 url 到 fn"""
         try:
-            chunk_size = 64 * 1024
-            dest = os.path.dirname(fn)
-            basefn = os.path.basename(fn)
-            os.makedirs(dest, exist_ok=True)
-            url_segs = urllib.parse.urlparse(url)
-            netloc = url_segs.netloc
-            with open(fn, "wb") as out:
-                logger.info(f"{Fore.YELLOW}oo Connecting to {netloc}")
-                with urllib.request.urlopen(url) as f:
-                    logger.info(f"oo Downloading {basefn} from {url}")
-                    logger.info(f"oo Downloading {basefn} to {dest}")
-                    while True:
-                        s = f.read(chunk_size)
-                        if len(s) == 0:
-                            break
-                        out.write(s)
-            return True
-        except urllib.error.HTTPError:
-            return False
+            return asyncio.run(DownloadPkg._download_async(url, fn))
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                return False
+            return e
         except Exception as e:
             return e
+
+    @staticmethod
+    async def _download_async(url: str, fn: str) -> bool:
+        """异步下载 url 到 fn。"""
+        chunk_size = 64 * 1024
+        dest = os.path.dirname(fn)
+        basefn = os.path.basename(fn)
+        os.makedirs(dest, exist_ok=True)
+        url_segs = urllib.parse.urlparse(url)
+        netloc = url_segs.netloc
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=300)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            logger.info(f"{Fore.YELLOW}oo Connecting to {netloc}")
+            async with session.get(url) as response:
+                response.raise_for_status()
+                logger.info(f"oo Downloading {basefn} from {url}")
+                logger.info(f"oo Downloading {basefn} to {dest}")
+                with open(fn, "wb") as out:
+                    async for chunk in response.content.iter_chunked(chunk_size):
+                        out.write(chunk)
+            return True
 
     def unpack_conda_pkg(
         self, out_fn: str, extract_dir: str, pkg_spec: PackageSpec
