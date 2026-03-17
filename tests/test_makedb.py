@@ -1,11 +1,36 @@
 import asyncio
+import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest import mock
 
 from conda_tool import makedb
 
 
 class ParseRepodataTests(unittest.IsolatedAsyncioTestCase):
+    async def test_save_single_package_writes_output_file(self) -> None:
+        package_data = [
+            {
+                "name": "foo",
+                "version": "1.0",
+                "timestamp": 10,
+                "build": "0",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(makedb, "SCRIPT_DIR", tmpdir):
+                with ThreadPoolExecutor(max_workers=1) as file_executor:
+                    await makedb.save_single_package(
+                        "foo",
+                        package_data,
+                        asyncio.Semaphore(1),
+                        file_executor,
+                    )
+
+            assert Path(tmpdir, "data", "packages", "foo.zstd").exists()
+
     async def test_parse_repodata_groups_records_by_package_name(self) -> None:
         data = {
             "foo-1.0-0.tar.bz2": {
@@ -39,19 +64,24 @@ class ParseRepodataTests(unittest.IsolatedAsyncioTestCase):
         saved_packages: dict[str, list[dict]] = {}
 
         async def fake_save_single_package(
-            package_name: str, package_data: list[dict]
+            package_name: str,
+            package_data: list[dict],
+            file_semaphore: asyncio.Semaphore,
+            file_executor: ThreadPoolExecutor,
         ) -> None:
             saved_packages[package_name] = package_data
 
         with mock.patch.object(
             makedb, "save_single_package", side_effect=fake_save_single_package
         ) as mocked_save:
-            await makedb.parse_repodata(
-                data,
-                "https://conda.anaconda.org/conda-forge",
-                asyncio.Semaphore(2),
-                asyncio.Semaphore(2),
-            )
+            with ThreadPoolExecutor(max_workers=2) as file_executor:
+                await makedb.parse_repodata(
+                    data,
+                    "https://conda.anaconda.org/conda-forge",
+                    asyncio.Semaphore(2),
+                    asyncio.Semaphore(2),
+                    file_executor,
+                )
 
         assert mocked_save.await_count == 2
         assert set(saved_packages) == {"foo", "bar"}
@@ -89,19 +119,24 @@ class ParseRepodataTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         async def fake_save_single_package(
-            package_name: str, package_data: list[dict]
+            package_name: str,
+            package_data: list[dict],
+            file_semaphore: asyncio.Semaphore,
+            file_executor: ThreadPoolExecutor,
         ) -> None:
             saved_packages[package_name] = package_data
 
         with mock.patch.object(
             makedb, "save_single_package", side_effect=fake_save_single_package
         ):
-            await makedb.parse_repodata(
-                repodata_sets,
-                "https://conda.anaconda.org/conda-forge",
-                asyncio.Semaphore(2),
-                asyncio.Semaphore(2),
-            )
+            with ThreadPoolExecutor(max_workers=2) as file_executor:
+                await makedb.parse_repodata(
+                    repodata_sets,
+                    "https://conda.anaconda.org/conda-forge",
+                    asyncio.Semaphore(2),
+                    asyncio.Semaphore(2),
+                    file_executor,
+                )
 
         assert len(saved_packages["shared"]) == 2
         assert {item["subdir"] for item in saved_packages["shared"]} == {

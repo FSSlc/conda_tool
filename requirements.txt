@@ -7,3 +7,4 @@ pathspec
 zstandard
 rich
 msgpack
+aiohttp

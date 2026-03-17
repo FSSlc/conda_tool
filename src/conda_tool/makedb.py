@@ -11,10 +11,11 @@ import sys
 import urllib.parse
 from collections import defaultdict
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from logging import getLogger
 from typing import Any
 
-import aiofiles
 import aiohttp
 import msgpack
 import zstandard
@@ -28,6 +29,27 @@ except ImportError:
 
 
 logger = getLogger("conda_tool.makedb")
+
+
+def _write_bytes(path: str, data: bytes) -> None:
+    """同步写入字节数据，供受控线程池复用。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+def _read_bytes(path: str) -> bytes:
+    """同步读取字节数据，供受控线程池复用。"""
+    with open(path, "rb") as f:
+        return f.read()
+
+
+async def run_file_io(
+    file_executor: ThreadPoolExecutor, func: Any, *args: Any
+) -> Any:
+    """在受控线程池中执行文件 IO。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(file_executor, partial(func, *args))
 
 
 async def download_with_retry(
@@ -53,7 +75,12 @@ async def download_with_retry(
     )
 
 
-async def save_repodata(arch: str, forge_url: str) -> dict[str, Any]:
+async def save_repodata(
+    arch: str,
+    forge_url: str,
+    file_semaphore: asyncio.Semaphore,
+    file_executor: ThreadPoolExecutor,
+) -> dict[str, Any]:
     """异步获取 repodata.json 数据"""
     os.makedirs(f"{SCRIPT_DIR}/data/{arch}", exist_ok=True)
     data = {}
@@ -76,12 +103,15 @@ async def save_repodata(arch: str, forge_url: str) -> dict[str, Any]:
             data.update(repodata.get("packages.conda", {}))
             # 保存压缩版本
             try:
-                async with aiofiles.open(
-                    f"{SCRIPT_DIR}/data/{arch}/data.zstd", "wb"
-                ) as f:
-                    cctx = zstandard.ZstdCompressor()
-                    compressed = cctx.compress(msgpack.dumps(data))  # type: ignore
-                    await f.write(compressed)
+                cctx = zstandard.ZstdCompressor()
+                compressed = cctx.compress(msgpack.dumps(data))  # type: ignore
+                async with file_semaphore:
+                    await run_file_io(
+                        file_executor,
+                        _write_bytes,
+                        f"{SCRIPT_DIR}/data/{arch}/data.zstd",
+                        compressed,
+                    )
             except OSError as e:
                 logger.error(f"Error saving compressed data: {str(e)}")
     except Exception as e:
@@ -116,10 +146,14 @@ async def process_package(
         logger.warning(f"Invalid package data for {pn}, missing key: {str(e)}")
 
 
-async def save_single_package(package_name: str, package_data: list[dict]) -> None:
+async def save_single_package(
+    package_name: str,
+    package_data: list[dict],
+    file_semaphore: asyncio.Semaphore,
+    file_executor: ThreadPoolExecutor,
+) -> None:
     """保存单个包数据到单独文件"""
     package_dir = f"{SCRIPT_DIR}/data/packages"
-    os.makedirs(package_dir, exist_ok=True)
     file_path = f"{package_dir}/{package_name}.zstd"
 
     try:
@@ -141,8 +175,8 @@ async def save_single_package(package_name: str, package_data: list[dict]) -> No
         cctx = zstandard.ZstdCompressor()
         compressed = cctx.compress(msgpack.dumps(package_data))  # type: ignore
 
-        async with aiofiles.open(file_path, "wb") as f:
-            await f.write(compressed)
+        async with file_semaphore:
+            await run_file_io(file_executor, _write_bytes, file_path, compressed)
     except OSError as e:
         logger.error(f"Error saving package {package_name}: {str(e)}")
 
@@ -161,6 +195,7 @@ async def parse_repodata(
     forge_url: str,
     semaphore: asyncio.Semaphore,
     file_semaphore: asyncio.Semaphore,
+    file_executor: ThreadPoolExecutor,
 ) -> None:
     """异步转换 repodata 数据"""
     logger.info("Extracting package database ...")
@@ -184,12 +219,10 @@ async def parse_repodata(
     package_items = list(pkg_db.items())
     for i in range(0, len(package_items), batch_size):
         batch = package_items[i : i + batch_size]
-        async def save_with_limit(package_name: str, package_data: list[dict]) -> None:
-            async with file_semaphore:
-                await save_single_package(package_name, package_data)
-
         tasks = [
-            save_with_limit(package_name, package_data)
+            save_single_package(
+                package_name, package_data, file_semaphore, file_executor
+            )
             for package_name, package_data in batch
         ]
         await asyncio.gather(*tasks)
@@ -198,14 +231,18 @@ async def parse_repodata(
         )
 
 
-async def load_existing_data(arch: str) -> dict[str, Any]:
+async def load_existing_data(
+    arch: str,
+    file_semaphore: asyncio.Semaphore,
+    file_executor: ThreadPoolExecutor,
+) -> dict[str, Any]:
     """加载现有的数据"""
     exist_data_fn = f"{SCRIPT_DIR}/data/{arch}/data.zstd"
     try:
-        async with aiofiles.open(exist_data_fn, "rb") as f:
-            dctx = zstandard.ZstdDecompressor()
-            data = await f.read()
-            return msgpack.loads(dctx.decompress(data))  # type: ignore
+        async with file_semaphore:
+            data = await run_file_io(file_executor, _read_bytes, exist_data_fn)
+        dctx = zstandard.ZstdDecompressor()
+        return msgpack.loads(dctx.decompress(data))  # type: ignore
     except Exception as e:
         logger.error(f"Error loading existing data for {arch}: {str(e)}")
         return {}
@@ -278,7 +315,11 @@ def parse_args() -> argparse.Namespace:
 
 
 async def process_arch(
-    arch: str, args: argparse.Namespace, semaphore: asyncio.Semaphore
+    arch: str,
+    args: argparse.Namespace,
+    semaphore: asyncio.Semaphore,
+    file_semaphore: asyncio.Semaphore,
+    file_executor: ThreadPoolExecutor,
 ) -> dict[str, Any]:
     """处理单个架构的数据"""
     async with semaphore:
@@ -287,10 +328,12 @@ async def process_arch(
             and not args.force_refresh
         ):
             logger.info(f"Loading existing data for {arch}...")
-            data = await load_existing_data(arch)
+            data = await load_existing_data(arch, file_semaphore, file_executor)
         else:
             logger.info(f"Downloading fresh data for {arch}...")
-            data = await save_repodata(arch, args.CONDA_FORGE_URL)
+            data = await save_repodata(
+                arch, args.CONDA_FORGE_URL, file_semaphore, file_executor
+            )
 
         return data
 
@@ -301,32 +344,35 @@ async def async_main() -> None:
     data = {}
     semaphore = asyncio.Semaphore(args.max)
     file_semaphore = asyncio.Semaphore(args.file_max)
+    with ThreadPoolExecutor(max_workers=max(1, args.file_max)) as file_executor:
+        # 并行处理所有架构
+        tasks = []
+        for arch in args.ARCHES:
+            tasks.append(
+                process_arch(arch, args, semaphore, file_semaphore, file_executor)
+            )
 
-    # 并行处理所有架构
-    tasks = []
-    for arch in args.ARCHES:
-        tasks.append(process_arch(arch, args, semaphore))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 检查并处理结果
+        for arch, result in zip(args.ARCHES, results, strict=False):
+            if isinstance(result, Exception):
+                logger.error(f"Error processing {arch}: {str(result)}")
+            else:
+                data[arch] = result
 
-    # 检查并处理结果
-    for arch, result in zip(args.ARCHES, results, strict=False):
-        if isinstance(result, Exception):
-            logger.error(f"Error processing {arch}: {str(result)}")
+        # 解析数据
+        if data:
+            await parse_repodata(
+                list(data.values()),
+                args.CONDA_FORGE_URL,
+                semaphore,
+                file_semaphore,
+                file_executor,
+            )
         else:
-            data[arch] = result
-
-    # 解析数据
-    if data:
-        await parse_repodata(
-            list(data.values()),
-            args.CONDA_FORGE_URL,
-            semaphore,
-            file_semaphore,
-        )
-    else:
-        logger.error("No valid data to process")
-        sys.exit(1)
+            logger.error("No valid data to process")
+            sys.exit(1)
 
 
 def main() -> None:
