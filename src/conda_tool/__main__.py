@@ -15,7 +15,8 @@ TOOLS: dict[str, str] = {
 
 
 def main() -> None:
-    # 主解析器（禁用自动帮助生成，我们自己处理）
+    """Dispatch to the requested subcommand module."""
+    # Main parser with automatic help disabled so each tool can handle it.
     main_parser = argparse.ArgumentParser(
         description="Conda Tool - A Swiss Army knife for conda packages", add_help=False
     )
@@ -23,47 +24,47 @@ def main() -> None:
         "-V", "--version", action="store_true", help="Show version and exit"
     )
 
-    # 子命令解析器
+    # Subcommand parser.
     subparsers = main_parser.add_subparsers(title="available commands", dest="command")
 
-    # 创建所有子命令（但不立即添加参数）
+    # Register all subcommands without adding their individual arguments yet.
     subcommands = {}
     for tool, help_text in TOOLS.items():
         subcommands[tool] = subparsers.add_parser(
             tool,
             help=help_text,
-            add_help=False,  # 各工具自己处理帮助
+            add_help=False,  # Each tool handles its own help output.
         )
 
-    # 先解析出命令名称
+    # Parse the command name first.
     main_args, remaining = main_parser.parse_known_args()
 
-    # 处理版本请求
+    # Handle version requests.
     if main_args.version:
         print(f"conda-tool {importlib.import_module('conda_tool').__version__}")
         return
 
-    # 检查是否指定了有效子命令
+    # Ensure a valid subcommand was provided.
     if not main_args.command:
         main_parser.print_help()
         print("\nError: missing command")
         sys.exit(1)
 
-    # 导入对应的工具模块
+    # Import the selected tool module.
     try:
         tool_module = importlib.import_module(f"conda_tool.{main_args.command}")
     except ImportError:
         print(f"Error: unknown command '{main_args.command}'", file=sys.stderr)
         sys.exit(1)
 
-    # 重建 sys.argv：工具名 + 剩余参数
+    # Rebuild sys.argv as tool name plus remaining arguments.
     sys.argv = [f"{main_args.command}.py"] + remaining
 
-    # 执行工具的主函数
+    # Execute the tool entry point.
     try:
         tool_module.main()
     except SystemExit:
-        # 允许工具自己处理退出（如显示帮助信息后退出）
+        # Allow tools to exit on their own, such as after printing help.
         pass
     except Exception as e:
         print(f"Error in {main_args.command}: {str(e)}", file=sys.stderr)

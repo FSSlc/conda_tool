@@ -14,6 +14,8 @@ from collections.abc import Sized
 from logging import getLogger
 
 import zstandard
+from rich.console import Console
+from rich.logging import RichHandler
 
 logger = getLogger("conda_tool.utils")
 
@@ -25,14 +27,11 @@ ZSTD_COMPRESS_THREADS = 1
 
 
 def setup_logging(terminal_width: int | None = None) -> None:
-    """设置日志格式"""
-    from rich.console import Console
-    from rich.logging import RichHandler
-
-    logger = logging.getLogger("conda_tool")
-    if logger.handlers:
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
+    """Configure logging output."""
+    root_logger = logging.getLogger("conda_tool")
+    if root_logger.handlers:
+        root_logger.setLevel(logging.INFO)
+        root_logger.propagate = False
         return
 
     console = Console(width=terminal_width) if terminal_width else None
@@ -45,24 +44,24 @@ def setup_logging(terminal_width: int | None = None) -> None:
         console=console,
     )
     rich_handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(rich_handler)
+    root_logger.addHandler(rich_handler)
 
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
+    root_logger.setLevel(logging.INFO)
+    root_logger.propagate = False
 
 
 def wrap_print(msg: str) -> None:
-    """包裹输出信息"""
+    """Print wrapped output."""
     print(textwrap.fill(msg, width=TEXT_WIDTH))
 
 
 def wrap_input(msg: str) -> str:
-    """包裹 input"""
+    """Read wrapped input."""
     return input(textwrap.fill(msg, width=TEXT_WIDTH, drop_whitespace=False))
 
 
 def get_choice(message: str, choices: list[str], default: int = 0) -> int:
-    """获取用户单一选择"""
+    """Prompt the user for a single choice."""
     wrap_print(message + ":")
     for i, c in enumerate(choices):
         print(f"  [{i}] {c}")
@@ -86,7 +85,7 @@ def get_choice(message: str, choices: list[str], default: int = 0) -> int:
 
 
 def hash_files(paths: list[str], algorithm: str = "md5") -> str:
-    """获取多个文件的一个 hash 值"""
+    """Compute a combined hash over multiple files."""
     h = hashlib.new(algorithm)
     for path in paths:
         with open(path, "rb") as fi:
@@ -99,7 +98,7 @@ def hash_files(paths: list[str], algorithm: str = "md5") -> str:
 
 
 def get_filelist(prefix: str, with_prefix: bool = False) -> list[str]:
-    """获取文件列表"""
+    """Return a file list for the given directory."""
     filelist = []
     for root, _, files in os.walk(prefix):
         for file in files:
@@ -124,15 +123,15 @@ def extract_zst(archive: str, out_path: str) -> None:
             dctx.copy_stream(ifh, ofh)
         ofh.seek(0)
         with tarfile.open(fileobj=ofh) as z:
-            if hasattr(tarfile, 'data_filter'):
-                # Python 3.12+ 支持 filter 参数
+            if hasattr(tarfile, "data_filter"):
+                # Python 3.12+ supports the filter argument.
                 z.extractall(out_path, filter="data")
             else:
                 z.extractall(out_path)
 
 
 def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
-    """解压压缩包"""
+    """Extract an archive."""
     if fmt == "zst":
         extract_zst(archive, out_path)
     elif fmt == "conda":
@@ -149,16 +148,18 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
         "tar.zx",
     ]:
         if fmt.startswith("tar"):
-            # 自定义 tar 解压逻辑，处理符号链接
+            # Use custom tar extraction to handle symbolic links safely.
             with tarfile.open(archive, "r:*") as tar:
                 for member in tar.getmembers():
                     try:
-                        # 跳过可疑的符号链接
+                        # Skip suspicious symbolic links.
                         if member.issym() and ".." in member.linkname:
                             continue
-                        if hasattr(tarfile, 'data_filter'):
-                            # Python 3.12+ 支持 filter 参数
-                            tar.extract(member, out_path, set_attrs=False, filter="data")
+                        if hasattr(tarfile, "data_filter"):
+                            # Python 3.12+ supports the filter argument.
+                            tar.extract(
+                                member, out_path, set_attrs=False, filter="data"
+                            )
                         else:
                             tar.extract(member, out_path, set_attrs=False)
                     except OSError as e:
@@ -170,21 +171,21 @@ def extract_archive(archive: str, out_path: str, fmt: str = "zip") -> None:
         raise ValueError(f"Unknown format {fmt} to extract.")
 
 
-def extract_large_tar(
+def extract_large_tar(  # pylint: disable=too-many-locals
     tar_path: str, extract_path: str, chunk_size: int = 8192, debug: bool = False
 ) -> None:
-    """高效解压大型 tar 文件的函数"""
+    """Extract large tar files efficiently."""
     try:
         os.makedirs(extract_path, exist_ok=True)
 
         with tarfile.open(tar_path, "r:*") as tar:
-            # 获取所有成员
+            # Load the member list once.
             members = tar.getmembers()
             total_files = len(members)
 
             for index, member in enumerate(members, 1):
                 try:
-                    # 防止路径穿越与符号链接攻击
+                    # Guard against path traversal and symlink attacks.
                     member_name = member.name
                     if (
                         os.path.isabs(member_name)
@@ -198,18 +199,21 @@ def extract_large_tar(
 
                     if debug:
                         logger.debug(
-                            f"进度：{index:03d}/{total_files:03d} ({(index / total_files) * 100:06.2f}%)"
-                            + f" - {member.name}"
+                            "进度：%03d/%03d (%06.2f%%) - %s",
+                            index,
+                            total_files,
+                            (index / total_files) * 100,
+                            member.name,
                         )
 
-                    # 如果是文件（不是目录）
+                    # Stream regular files to disk.
                     if member.isfile():
-                        # 创建目标文件的目录结构
+                        # Create the target directory tree first.
                         target_path = os.path.join(extract_path, member.name)
                         target_dir = os.path.dirname(target_path)
                         os.makedirs(target_dir, exist_ok=True)
 
-                        # 以流式方式提取文件
+                        # Extract the file in streaming mode.
                         source = tar.extractfile(member)
                         if source is not None:
                             with open(target_path, "wb") as target:
@@ -220,13 +224,13 @@ def extract_large_tar(
                                     target.write(chunk)
                             source.close()
                     else:
-                        # 对于目录，直接创建
-                        if hasattr(tarfile, 'data_filter'):
-                            # Python 3.12+ 支持 filter 参数
+                        # Directories can be extracted as-is.
+                        if hasattr(tarfile, "data_filter"):
+                            # Python 3.12+ supports the filter argument.
                             tar.extract(member, extract_path, filter="data")
                         else:
                             tar.extract(member, extract_path)
-                    # 定期进行垃圾回收
+                    # Trigger periodic garbage collection.
                     if index % 100 == 0:
                         gc.collect()
                 except (OSError, tarfile.TarError) as e:
@@ -242,7 +246,7 @@ def extract_large_tar(
 
 @contextlib.contextmanager
 def tmp_chdir(dest: str):
-    """进入临时目录"""
+    """Temporarily change into a directory."""
     curdir = os.getcwd()
     try:
         os.chdir(dest)
@@ -272,27 +276,27 @@ class NullWriter:
         self.size = 0
 
     def write(self, write_bytes: Sized) -> int:
-        """计算写的 bytes 数目"""
+        """Track the number of written bytes."""
         self.size += len(write_bytes)
         return len(write_bytes)
 
     def tell(self) -> int:
-        """返回当前位置"""
+        """Return the current position."""
         return self.size
 
 
 def compressor() -> zstandard.ZstdCompressor:
-    """定义一个压缩器"""
+    """Create the shared zstd compressor configuration."""
     return zstandard.ZstdCompressor(
         level=ZSTD_COMPRESS_LEVEL, threads=ZSTD_COMPRESS_THREADS
     )
 
 
 def is_elf_file(file_path: str) -> bool:
-    """通过读取文件头判断是否为 ELF 文件"""
+    """Determine whether a file is ELF by reading its header."""
     try:
         with open(file_path, "rb") as f:
-            # 读取前 4 个字节
+            # Read the first four bytes.
             header = f.read(4)
             return header == b"\x7fELF"
     except OSError:
@@ -300,6 +304,7 @@ def is_elf_file(file_path: str) -> bool:
 
 
 def abs_path(file_path: str) -> str:
+    """Resolve a path relative to the current script directory."""
     if not os.path.isabs(file_path):
         file_path = os.path.abspath(os.path.join(SCRIPT_DIR, file_path))
     return file_path

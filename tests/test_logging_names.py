@@ -1,3 +1,7 @@
+"""Tests for logger naming."""
+
+# pylint: disable=missing-function-docstring,missing-class-docstring,no-name-in-module
+
 import logging
 
 from conda_tool import dlpkg, extract, makedb, modify, repack
@@ -17,4 +21,3 @@ class LoggingNamespaceTests:
         initial_count = len(logger.handlers)
         setup_logging(120)
         assert len(logger.handlers) == initial_count
-

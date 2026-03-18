@@ -32,14 +32,14 @@ logger = getLogger("conda_tool.makedb")
 
 
 def _write_bytes(path: str, data: bytes) -> None:
-    """同步写入字节数据，供受控线程池复用。"""
+    """Write bytes synchronously for reuse by the bounded thread pool."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(data)
 
 
 def _read_bytes(path: str) -> bytes:
-    """同步读取字节数据，供受控线程池复用。"""
+    """Read bytes synchronously for reuse by the bounded thread pool."""
     with open(path, "rb") as f:
         return f.read()
 
@@ -47,7 +47,7 @@ def _read_bytes(path: str) -> bytes:
 async def run_file_io(
     file_executor: ThreadPoolExecutor, func: Any, *args: Any
 ) -> Any:
-    """在受控线程池中执行文件 IO。"""
+    """Run file I/O in the bounded thread pool."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(file_executor, partial(func, *args))
 
@@ -55,20 +55,19 @@ async def run_file_io(
 async def download_with_retry(
     session: aiohttp.ClientSession, url: str, max_retries: int = 3
 ) -> bytes:
-    """下载数据并自动重试"""
+    """Download data with automatic retry."""
     last_error = None
     for attempt in range(max_retries):
         try:
             async with session.get(url) as response:
                 if response.status == 200:
                     return await response.read()
-                else:
-                    last_error = f"HTTP Error {response.status}"
+                last_error = f"HTTP Error {response.status}"
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             last_error = str(e)
 
         if attempt < max_retries - 1:
-            await asyncio.sleep(2**attempt)  # 指数退避
+            await asyncio.sleep(2**attempt)  # Exponential backoff.
 
     raise RuntimeError(
         f"Failed to download {url} after {max_retries} attempts. Last error: {last_error}"
@@ -81,7 +80,7 @@ async def save_repodata(
     file_semaphore: asyncio.Semaphore,
     file_executor: ThreadPoolExecutor,
 ) -> dict[str, Any]:
-    """异步获取 repodata.json 数据"""
+    """Fetch repodata.json asynchronously."""
     os.makedirs(f"{SCRIPT_DIR}/data/{arch}", exist_ok=True)
     data = {}
     if not forge_url.endswith("/"):
@@ -98,10 +97,10 @@ async def save_repodata(
             repodata = bz2.decompress(compressed_data)
             repodata = json.loads(repodata)
 
-            # 合并 packages 和 packages.conda
+            # Merge packages and packages.conda.
             data.update(repodata.get("packages", {}))
             data.update(repodata.get("packages.conda", {}))
-            # 保存压缩版本
+            # Save the compressed snapshot.
             try:
                 cctx = zstandard.ZstdCompressor()
                 compressed = cctx.compress(msgpack.dumps(data))  # type: ignore
@@ -124,7 +123,7 @@ async def save_repodata(
 async def process_package(
     pkg_db: defaultdict, pn: str, p: dict[str, Any], forge_url: str
 ) -> None:
-    """处理单个包数据"""
+    """Process a single package record."""
     try:
         n = p["name"]
         v = p["version"]
@@ -152,12 +151,12 @@ async def save_single_package(
     file_semaphore: asyncio.Semaphore,
     file_executor: ThreadPoolExecutor,
 ) -> None:
-    """保存单个包数据到单独文件"""
+    """Save a single package's data to its own file."""
     package_dir = f"{SCRIPT_DIR}/data/packages"
     file_path = f"{package_dir}/{package_name}.zstd"
 
     try:
-        # 优化内存使用：立即处理排序而不保存中间结果
+        # Reduce memory usage by sorting immediately without storing intermediates.
         package_data = sorted(
             package_data,
             key=lambda x: (PV(x["version"]), x["timestamp"], x["build"]),
@@ -171,7 +170,7 @@ async def save_single_package(
         )
 
     try:
-        # 使用上下文管理器确保文件正确关闭
+        # Use a context-managed write path so files are closed promptly.
         cctx = zstandard.ZstdCompressor()
         compressed = cctx.compress(msgpack.dumps(package_data))  # type: ignore
 
@@ -184,7 +183,7 @@ async def save_single_package(
 def iter_repodata_items(
     data: dict[str, Any] | list[dict[str, Any]],
 ) -> Iterable[tuple[str, dict[str, Any]]]:
-    """迭代一个或多个 repodata 字典中的包记录。"""
+    """Iterate package records from one or more repodata mappings."""
     repodata_groups = [data] if isinstance(data, dict) else data
     for repodata in repodata_groups:
         yield from repodata.items()
@@ -197,11 +196,11 @@ async def parse_repodata(
     file_semaphore: asyncio.Semaphore,
     file_executor: ThreadPoolExecutor,
 ) -> None:
-    """异步转换 repodata 数据"""
+    """Convert repodata into the local package database asynchronously."""
     logger.info("Extracting package database ...")
     pkg_db = defaultdict(list)
 
-    # 并行处理包数据
+    # Process package records in parallel.
     logger.info("Processing packages ...")
     async def process_with_limit(pn: str, p: dict[str, Any]) -> None:
         async with semaphore:
@@ -214,8 +213,8 @@ async def parse_repodata(
         tasks = [process_with_limit(pn, p) for pn, p in batch]
         await asyncio.gather(*tasks)
 
-    # 分批保存包数据以避免打开太多文件
-    batch_size = 100  # 每批处理 100 个包
+    # Save packages in batches to avoid opening too many files at once.
+    batch_size = 100  # Process 100 packages per batch.
     package_items = list(pkg_db.items())
     for i in range(0, len(package_items), batch_size):
         batch = package_items[i : i + batch_size]
@@ -236,7 +235,7 @@ async def load_existing_data(
     file_semaphore: asyncio.Semaphore,
     file_executor: ThreadPoolExecutor,
 ) -> dict[str, Any]:
-    """加载现有的数据"""
+    """Load an existing repodata snapshot."""
     exist_data_fn = f"{SCRIPT_DIR}/data/{arch}/data.zstd"
     try:
         async with file_semaphore:
@@ -249,7 +248,7 @@ async def load_existing_data(
 
 
 def parse_args() -> argparse.Namespace:
-    """解析命令行参数"""
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--arch",
@@ -321,7 +320,7 @@ async def process_arch(
     file_semaphore: asyncio.Semaphore,
     file_executor: ThreadPoolExecutor,
 ) -> dict[str, Any]:
-    """处理单个架构的数据"""
+    """Process repodata for a single architecture."""
     async with semaphore:
         if (
             os.path.exists(f"{SCRIPT_DIR}/data/{arch}/data.zstd")
@@ -339,13 +338,13 @@ async def process_arch(
 
 
 async def async_main() -> None:
-    """异步主逻辑"""
+    """Run the asynchronous main workflow."""
     args = parse_args()
     data = {}
     semaphore = asyncio.Semaphore(args.max)
     file_semaphore = asyncio.Semaphore(args.file_max)
     with ThreadPoolExecutor(max_workers=max(1, args.file_max)) as file_executor:
-        # 并行处理所有架构
+        # Process all architectures in parallel.
         tasks = []
         for arch in args.ARCHES:
             tasks.append(
@@ -354,14 +353,14 @@ async def async_main() -> None:
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 检查并处理结果
+        # Check and collect results.
         for arch, result in zip(args.ARCHES, results, strict=False):
             if isinstance(result, Exception):
                 logger.error(f"Error processing {arch}: {str(result)}")
             else:
                 data[arch] = result
 
-        # 解析数据
+        # Parse the collected data.
         if data:
             await parse_repodata(
                 list(data.values()),
@@ -376,7 +375,7 @@ async def async_main() -> None:
 
 
 def main() -> None:
-    """同步入口函数"""
+    """Run the synchronous entry point."""
     setup_logging(120)
     try:
         asyncio.run(async_main())

@@ -6,6 +6,7 @@ import argparse
 import os
 import shutil
 import sys
+import tarfile
 from logging import getLogger
 from typing import Any
 
@@ -28,10 +29,10 @@ HEADER_PREFIXES = {
 
 
 def parse_args() -> argparse.Namespace:
-    """解析命令行参数"""
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="conda sh 包解压工具")
 
-    # 添加参数
+    # Add command line arguments.
     parser.add_argument("-s", "--source", required=True, help="sh 源文件路径")
     parser.add_argument(
         "-o",
@@ -58,14 +59,14 @@ def parse_args() -> argparse.Namespace:
         "-k", "--keep_tar", action="store_true", required=False, help="是否删除压缩包"
     )
 
-    # 解析参数
+    # Parse arguments.
     args = parser.parse_args()
 
-    # 获取参数值
+    # Normalize resolved paths.
     args.source = abs_path(args.source)
     args.output = abs_path(args.output)
 
-    # 检查源文件是否存在
+    # Validate the input source path.
     if not os.path.isfile(args.source):
         logger.error(f"错误：源文件 '{args.source}' 不存在")
         sys.exit(1)
@@ -89,7 +90,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _parse_boundary_value(line: bytes, boundary_name: bytes) -> int | None:
-    """从 header 中解析 boundary 长度。"""
+    """Parse a boundary size from the shell header."""
     if boundary_name not in line:
         return None
 
@@ -100,7 +101,7 @@ def _parse_boundary_value(line: bytes, boundary_name: bytes) -> int | None:
 
 
 def parse_sh(source_path: str, output_msg: bool = True) -> dict[str, Any]:
-    """读取 sh 获取必要信息"""
+    """Read the shell archive and extract the required metadata."""
     if output_msg:
         logger.info("解析 sh 文件信息")
     return_data = {
@@ -162,7 +163,7 @@ def parse_sh(source_path: str, output_msg: bool = True) -> dict[str, Any]:
 
 
 class Extractor:
-    """解压 conda constructor sh 包"""
+    """Extract packages from a conda constructor shell archive."""
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.source_path = args.source
@@ -171,7 +172,7 @@ class Extractor:
         self.generate_repo = args.generate_repo
 
     def run(self) -> None:
-        """执行具体的解压操作"""
+        """Run the extraction workflow."""
         pkgs_dir = os.path.join(self.output_dir, "workdir", "pkgs")
         os.makedirs(pkgs_dir, exist_ok=True)
 
@@ -187,7 +188,7 @@ class Extractor:
         self.extract_tar()
 
     def extract_script(self, script_data: bytes) -> None:
-        """输出 sh 文件脚本内容"""
+        """Write the shell script payload."""
         logger.info("输出 sh 文件脚本内容")
         tpl_path = os.path.join(self.output_dir, "tpl.sh")
         with open(tpl_path, "wb") as fout:
@@ -195,7 +196,7 @@ class Extractor:
         logger.info("输出 sh 文件脚本内容完毕")
 
     def extract_conda_exec(self, old_mode: bool, conda_exec_data: bytes) -> None:
-        """输出 sh 文件自带 conda 可执行程序"""
+        """Write the bundled conda executable when present."""
         if not old_mode:
             logger.info("输出 sh 文件自带 conda 可执行程序")
             conda_exec_path = os.path.join(self.output_dir, "_conda")
@@ -204,7 +205,7 @@ class Extractor:
             logger.info("输出 sh 文件自带 conda 可执行程序完毕")
 
     def extract_payload(self, pkgs_data: bytes) -> None:
-        """输出 sh 文件 conda 包"""
+        """Write the packaged conda payload."""
         logger.info("输出 sh 文件 conda 包")
         pkgs_path = os.path.join(self.output_dir, "pkgs.tar")
         with open(pkgs_path, "wb") as fout:
@@ -212,7 +213,7 @@ class Extractor:
         logger.info("输出 sh 文件 conda 压缩包完毕")
 
     def extract_tar(self) -> None:
-        """解压 sh 文件 conda 包"""
+        """Extract the packaged conda payload."""
         logger.info("解压 sh 文件 conda 包")
         pkgs_path = os.path.join(self.output_dir, "pkgs.tar")
         pkgs_output_dir = os.path.join(self.output_dir, "workdir")
@@ -226,8 +227,10 @@ class Extractor:
             os.unlink(pkgs_path)
         logger.info("解压 sh 文件 conda 压缩包完毕")
 
-    def make_repo(self, conda_pkgs_dir: str, pkgs_output_dir: str) -> None:
-        """按照 conda channel 形式组织 conda 包"""
+    def make_repo(  # pylint: disable=too-many-locals
+        self, conda_pkgs_dir: str, pkgs_output_dir: str
+    ) -> None:
+        """Reorganize packages into a conda channel-style layout."""
         preconda_dir = os.path.join(pkgs_output_dir, "preconda")
         urls_txt = os.path.join(conda_pkgs_dir, "urls.txt")
         should_cleanup_preconda = False
@@ -240,11 +243,9 @@ class Extractor:
                 )
 
             os.makedirs(preconda_dir, exist_ok=True)
-            # 使用 tarfile 模块以支持 filter 参数
-            import tarfile
             with tarfile.open(preconda_tar, "r:bz2") as tar:
                 if hasattr(tarfile, 'data_filter'):
-                    # Python 3.12+ 支持 filter 参数
+                    # Python 3.12+ supports the filter argument.
                     tar.extractall(preconda_dir, filter="data")
                 else:
                     tar.extractall(preconda_dir)
@@ -293,7 +294,7 @@ class Extractor:
 
 
 def main() -> None:
-    """主函数"""
+    """Run the command entry point."""
     setup_logging(120)
     args = parse_args()
     extractor = Extractor(args)

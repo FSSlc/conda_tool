@@ -1,3 +1,8 @@
+"""Tests for repack."""
+
+# pylint: disable=missing-function-docstring,missing-class-docstring
+# pylint: disable=import-outside-toplevel
+
 import hashlib
 import os
 import sys

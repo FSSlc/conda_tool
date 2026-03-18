@@ -3,6 +3,7 @@
 """A tool to modify and repack conda constructor sh packages."""
 
 import argparse
+import importlib
 import os
 import sys
 import tarfile
@@ -15,6 +16,15 @@ except ImportError:
     from conda_tool.utils import abs_path, hash_files, setup_logging
 
 logger = getLogger("conda_tool.repack")
+
+
+def load_tool_attr(module_name: str, attr_name: str):
+    """Import an attribute from a sibling module with script fallback."""
+    try:
+        module = importlib.import_module(f".{module_name}", __package__)
+    except ImportError:
+        module = importlib.import_module(f"conda_tool.{module_name}")
+    return getattr(module, attr_name)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,33 +60,21 @@ def parse_args() -> argparse.Namespace:
 
 def extract_sh_package(source_sh: str, temp_dir: str) -> None:
     """Extract the sh package using extract.py"""
-    import sys as sys_module
-
+    extract_main = load_tool_attr("extract", "main")
+    original_argv = sys.argv
     try:
-        from .extract import main as extract_main
-    except ImportError:
-        from conda_tool.extract import main as extract_main
-
-    original_argv = sys_module.argv
-    try:
-        sys_module.argv = ["extract.py", "-s", source_sh, "-o", temp_dir, "--clean"]
+        sys.argv = ["extract.py", "-s", source_sh, "-o", temp_dir, "--clean"]
         extract_main()
     finally:
-        sys_module.argv = original_argv
+        sys.argv = original_argv
 
 
 def modify_package_content(work_dir: str, config_path: str) -> None:
     """Modify the package content using modify.py"""
-    import sys as sys_module
-
+    modify_main = load_tool_attr("modify", "main")
+    original_argv = sys.argv
     try:
-        from .modify import main as modify_main
-    except ImportError:
-        from conda_tool.modify import main as modify_main
-
-    original_argv = sys_module.argv
-    try:
-        sys_module.argv = [
+        sys.argv = [
             "modify.py",
             "-c",
             config_path,
@@ -85,16 +83,14 @@ def modify_package_content(work_dir: str, config_path: str) -> None:
         ]
         modify_main()
     finally:
-        sys_module.argv = original_argv
+        sys.argv = original_argv
 
 
-def repack_sh_package(original_sh: str, work_dir: str, output_path: str) -> None:
+def repack_sh_package(  # pylint: disable=too-many-locals
+    original_sh: str, work_dir: str, output_path: str
+) -> None:
     """Repack the modified package into a new sh file"""
-
-    try:
-        from .extract import parse_sh
-    except ImportError:
-        from conda_tool.extract import parse_sh
+    parse_sh = load_tool_attr("extract", "parse_sh")
 
     sh_datas = parse_sh(original_sh, False)
     old_mode = sh_datas["old_mode"]

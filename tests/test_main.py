@@ -1,8 +1,13 @@
+"""Tests for CLI entrypoint."""
+
+# pylint: disable=missing-function-docstring,missing-class-docstring,duplicate-code
+
 import sys
 from unittest import mock
 
 import pytest
 
+from conda_tool import __version__
 from conda_tool.__main__ import TOOLS, main
 
 
@@ -12,7 +17,7 @@ class TestMain:
             main()
         captured = capsys.readouterr()
         assert "conda-tool" in captured.out
-        assert "0.1.0" in captured.out
+        assert __version__ in captured.out
 
     def test_no_command_exits(self):
         with mock.patch.object(sys, "argv", ["conda-tool"]):

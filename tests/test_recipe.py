@@ -1,4 +1,7 @@
-"""Tests for conda_tool.recipe — RecipeParser for meta.yaml and recipe.yaml."""
+"""Tests for conda_tool.recipe."""
+
+# pylint: disable=missing-function-docstring,missing-class-docstring
+# pylint: disable=use-implicit-booleaness-not-comparison
 
 import os
 import tempfile

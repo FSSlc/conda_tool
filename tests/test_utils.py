@@ -1,3 +1,8 @@
+"""Tests for utils."""
+
+# pylint: disable=missing-function-docstring,missing-class-docstring
+# pylint: disable=too-few-public-methods,import-outside-toplevel
+
 import os
 import tarfile
 import tempfile

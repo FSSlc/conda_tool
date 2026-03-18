@@ -20,11 +20,15 @@ PackageUrl = str | list[str]
 
 
 class RecipeFormat(Enum):
+    """Supported recipe file formats."""
+
     META_YAML = "meta.yaml"
     RECIPE_YAML = "recipe.yaml"
 
 
 class SourceUrlSpec(TypedDict):
+    """Normalized source URL entry extracted from a recipe."""
+
     url: PackageUrl
     hash_type: HashType | None
     hash: str | None
@@ -32,17 +36,17 @@ class SourceUrlSpec(TypedDict):
 
 
 class RecipeParser:
-    """解析 conda recipe 并支持结构化修改 source URL。
+    """Parse conda recipes and support structured source URL rewriting.
 
-    同时支持 meta.yaml (conda-build, Jinja2 ``{{ }}``) 和
-    recipe.yaml (rattler-build, ``${{ }}``) 两种格式。
+    Supports both meta.yaml (conda-build, Jinja2 ``{{ }}``) and
+    recipe.yaml (rattler-build, ``${{ }}``) formats.
     """
 
-    # ${{ ... }} 必须在 {{ ... }} 之前匹配，避免内层被先吃掉
+    # Match ${{ ... }} before {{ ... }} to avoid consuming the inner expression first.
     _TEMPLATE_EXPR_RE = re.compile(r"\$\{\{.*?\}\}|\{\{.*?\}\}")
-    # {% ... %} Jinja2 控制语句（整行）
+    # Full-line Jinja2 control statements such as {% ... %}.
     _JINJA2_STMT_RE = re.compile(r"^(\s*)\{%.*?%\}\s*$", re.MULTILINE)
-    # conda-build selector 注释，如 # [win]
+    # conda-build selector comments such as # [win].
     _SELECTOR_RE = re.compile(r"#\s*\[.*?\]\s*$", re.MULTILINE)
 
     def __init__(self, recipe_path: str) -> None:
@@ -76,55 +80,55 @@ class RecipeParser:
         return key
 
     def _sanitize(self, content: str) -> str:
-        """将模板语法替换为占位符，使内容成为合法 YAML"""
-        # 为了使 YAML 解析器能够解析文件，我们需要将所有 Jinja2 语法转为占位符
-        # 但之后在输出时，要将 set 语句恢复为正常格式
+        """Replace template syntax with placeholders so the content becomes valid YAML."""
+        # Convert Jinja2 syntax into placeholders so the YAML parser can read it.
+        # Restore set statements to their original form when writing the file back.
 
-        # 首先处理整行的 Jinja2 语句（可能要特别处理 set 语句）
+        # Handle full-line Jinja2 statements first, especially set statements.
         lines = content.splitlines()
         temp_lines = []
         for line_idx, line in enumerate(lines):
             match = self._JINJA2_STMT_RE.match(line)
             if match:
-                # 这是一整行的 Jinja2 语句
+                # This line is a full Jinja2 statement.
                 token = match.group(0).strip()
                 key = f"__JINJA2_STMT_{line_idx}__"
-                # 存储原始的 Jinja2 语句，以便在输出时决定如何恢复
+                # Store the original Jinja2 statement so restoration can preserve intent.
                 self._placeholders[key] = token
                 indent = match.group(1)
-                # 在 YAML 解析阶段，将所有 Jinja2 语句替换为注释，以确保 YAML 解析成功
-                # 稍后在恢复时，我们会根据语句类型决定是否取消注释
+                # Replace Jinja2 statements with comments during YAML parsing.
+                # Later restoration decides whether the comment marker should be removed.
                 temp_lines.append(f"{indent}# {key}")
             else:
                 temp_lines.append(line)
 
-        # 对于 ${{ }} 和 {{ }} 表达式，替换为占位符
+        # Replace ${{ }} and {{ }} expressions with placeholders.
         result = "\n".join(temp_lines)
         result = self._TEMPLATE_EXPR_RE.sub(self._make_placeholder, result)
         return result
 
     def _restore(self, content: str) -> str:
-        """将占位符还原为原始模板语法"""
-        # 先替换表达式占位符（{{ }} 和 ${{ }}）
+        """Restore placeholders back to the original template syntax."""
+        # Restore expression placeholders first ({{ }} and ${{ }}).
         for key, value in sorted(
             self._placeholders.items(), key=lambda kv: -len(kv[0])
         ):
-            # 如果是一个 Jinja2 语句的占位符
+            # Handle placeholders for Jinja2 statements separately.
             if key.startswith("__JINJA2_STMT_"):
-                # 识别是否是 set 语句
+                # Detect whether this is a set statement.
                 if "set " in value:
-                    # 是 set 语句，恢复为正常格式
+                    # Restore set statements as active syntax.
                     content = content.replace(f"# {key}", value)
                 else:
-                    # 是控制语句，保持为注释格式
+                    # Keep control statements commented out.
                     content = content.replace(f"# {key}", f"# {value}")
             else:
-                # 普通表达式占位符，直接替换
+                # Plain expression placeholders can be restored directly.
                 content = content.replace(key, value)
         return content
 
     def load_urls(self) -> list[SourceUrlSpec]:
-        """从 recipe 中提取所有 source URL"""
+        """Extract all source URLs from the recipe."""
         if self.data is None:
             return []
         if self.format == RecipeFormat.META_YAML:
@@ -147,16 +151,15 @@ class RecipeParser:
                     logger.warning(f"Not supporting source type for {item}")
                 continue
             url = item["url"]
-            # 为了提取 URL 而不影响后续使用，我们先还原
-            # 但在返回 URL 之前，需要确保 urllib.parse 可以处理它
+            # Restore placeholders for extraction without affecting later updates.
+            # Any urllib.parse-specific handling should happen at the call site.
             final_url: PackageUrl
             if isinstance(url, str):
-                # 如果需要处理 urllib.parse 中的问题，应该在使用 URL 时再处理
                 final_url = self._restore(url)
             elif isinstance(url, list):
                 final_url = [self._restore(str(u)) for u in item["url"]]
             else:
-                # 对于其他类型，直接使用原始值
+                # Preserve non-string values as-is.
                 final_url = url
 
             hash_type: HashType | None = None
@@ -176,14 +179,14 @@ class RecipeParser:
         return result
 
     def replace_source_urls(self, url_mapping: dict[int, str]) -> str:
-        """替换 source URL 并返回修改后的完整文件内容。
+        """Replace source URLs and return the updated file content.
 
         Args:
-            url_mapping: ``{source_index: new_local_path}`` 映射。
-                         原有 URL 会被注释保留。
+            url_mapping: Mapping of ``{source_index: new_local_path}``.
+                Original URLs are preserved as comments.
 
         Returns:
-            修改后的文件内容字符串（已还原模板语法）。
+            Updated file content with template syntax restored.
         """
         if self.data is None or "source" not in self.data:
             return self.raw_content
@@ -201,19 +204,19 @@ class RecipeParser:
                 continue
 
             old_url = source["url"]
-            # 构造注释文本（还原占位符以显示原始 URL）
+            # Build comment text from the restored original URL.
             if isinstance(old_url, list):
                 comment = " | ".join(self._restore(str(u)) for u in old_url)
             else:
                 comment = self._restore(str(old_url))
 
-            # 为新路径添加注释并替换 URL
+            # Replace the URL and annotate it with the original value.
             source["url"] = new_path
-            # 为了确保字典对象支持注释功能，我们重新获取它
+            # Only ruamel.yaml comment-aware nodes support end-of-line comments.
             if hasattr(sources[idx], "yaml_add_eol_comment"):
                 sources[idx].yaml_add_eol_comment(f"original: {comment}", "url")
             else:
-                # 如果对象不支持注释功能，则保留原始 URL 的注释信息
+                # Fall back silently when comment support is unavailable.
                 pass
 
         stream = io.StringIO()
@@ -222,7 +225,7 @@ class RecipeParser:
         return self._restore(result)
 
     def save(self, output_path: str, content: str | None = None) -> None:
-        """保存修改后的 recipe 文件"""
+        """Save the updated recipe file."""
         if content is None:
             stream = io.StringIO()
             self._yaml.dump(self.data, stream)
@@ -231,7 +234,7 @@ class RecipeParser:
             f.write(content)
 
     def extract_reqs(self) -> str:
-        """从 recipe 数据结构中提取 requirements 段"""
+        """Extract the requirements section from the parsed recipe data."""
         if self.data is None :
             return ""
         if self.format == RecipeFormat.META_YAML:

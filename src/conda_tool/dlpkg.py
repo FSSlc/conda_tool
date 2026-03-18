@@ -47,6 +47,8 @@ fn_is_simple = re.compile(r"^v?\d+([\-.]\d+)+(\.\w+)+$").match
 
 
 class PackageSpec(TypedDict):
+    """Normalized package metadata used by ``ct_dlpkg``."""
+
     name: str
     version: str
     nv: str
@@ -62,22 +64,26 @@ RecipePaths = tuple[str, str, str, str]
 
 
 class PrefixShardInfo(TypedDict):
+    """Metadata block from ``repodata_shards.msgpack.zst``."""
+
     base_url: str
     shards_base_url: str
 
 
 class PrefixShardIndex(TypedDict):
+    """Decoded shard index mapping package names to shard digests."""
+
     info: PrefixShardInfo
     shards: dict[str, bytes]
 
 
 def url_basename(url: str) -> str:
-    """获取名称"""
+    """Return the basename extracted from a URL."""
     return os.path.basename(urllib.parse.urlparse(url).path)
 
 
 def parse_args() -> argparse.Namespace:
-    """解析命令行参数"""
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "PKGNAME",
@@ -166,19 +172,17 @@ def parse_args() -> argparse.Namespace:
 
 
 class DownloadPkg:
-    """从依赖数据中获取下载地址并下载源码、修改 meta.yaml"""
+    """Download package sources from dependency metadata and update the recipe."""
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.workdir = self.args.workdir
-        self.pkg_name = self.args.PKGNAME
-        self.pkgs_dir = self.args.pkgs_dir
-        self.recipes_dir = self.args.recipes_dir
         self.errors: list[str] = []
         self._prefix_shard_index_cache: dict[str, PrefixShardIndex] = {}
+        self.extract_dir = ""
+        self.recipe_format = RecipeFormat.META_YAML
 
     def run(self) -> None:
-        """主要实现逻辑"""
+        """Run the main workflow."""
 
         pkg_spec = self.get_pkg_spec()
         self.create_feedstock(pkg_spec)
@@ -191,8 +195,8 @@ class DownloadPkg:
             logger.error("-" * 80)
 
     def load_pkg_specs_from_local_db(self) -> list[PackageSpec]:
-        """从本地 zstd/msgpack 数据库加载软件包信息。"""
-        spec_file = os.path.join(self.args.specs_dir, f"{self.pkg_name}.zstd")
+        """Load package metadata from the local zstd/msgpack database."""
+        spec_file = os.path.join(self.args.specs_dir, f"{self.args.PKGNAME}.zstd")
         if not os.path.exists(spec_file):
             raise FileNotFoundError(spec_file)
 
@@ -202,12 +206,12 @@ class DownloadPkg:
 
     @staticmethod
     def _decode_msgpack_zstd(payload: bytes) -> object:
-        """解码 prefix.dev 返回的 msgpack+zstd 数据。"""
+        """Decode prefix.dev msgpack+zstd payloads."""
         dctx = zstandard.ZstdDecompressor()
         return msgpack.loads(dctx.decompress(payload))
 
     async def _read_url_bytes_async(self, url: str) -> bytes:
-        """异步读取远程字节内容。"""
+        """Read remote bytes asynchronously."""
         timeout = aiohttp.ClientTimeout(total=self.args.prefix_dev_timeout)
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.get(url) as response:
@@ -215,18 +219,18 @@ class DownloadPkg:
                 return await response.read()
 
     def _read_url_bytes(self, url: str) -> bytes:
-        """同步包装异步远程读取。"""
+        """Wrap asynchronous remote reads with a synchronous interface."""
         return asyncio.run(self._read_url_bytes_async(url))
 
     def _prefix_platform_base_url(self, platform: str) -> str:
-        """构造 prefix.dev 某个平台目录的基础 URL。"""
+        """Build the base URL for a prefix.dev platform directory."""
         return (
             f"{self.args.prefix_dev_url.rstrip('/')}/"
             f"{self.args.prefix_dev_channel}/{platform}/"
         )
 
     def _get_prefix_shard_index(self, platform: str) -> PrefixShardIndex:
-        """获取某个平台的 repodata shard 索引。"""
+        """Fetch the repodata shard index for a platform."""
         if platform in self._prefix_shard_index_cache:
             return self._prefix_shard_index_cache[platform]
 
@@ -263,7 +267,7 @@ class DownloadPkg:
 
     @staticmethod
     def _normalize_digest_hex(digest: object) -> str:
-        """将 msgpack 中的 bytes digest 规范化为十六进制字符串。"""
+        """Normalize msgpack byte digests to hexadecimal strings."""
         if isinstance(digest, (bytes, bytearray, memoryview)):
             return bytes(digest).hex()
         if isinstance(digest, str):
@@ -272,7 +276,7 @@ class DownloadPkg:
 
     @staticmethod
     def _normalize_md5(md5: object) -> str:
-        """将记录中的 md5 规范化为字符串。"""
+        """Normalize record md5 values to strings."""
         if isinstance(md5, (bytes, bytearray, memoryview)):
             return bytes(md5).hex()
         if isinstance(md5, str):
@@ -281,15 +285,17 @@ class DownloadPkg:
 
     @staticmethod
     def _normalize_timestamp(timestamp: object) -> int:
-        """将记录中的 timestamp 规范化为整数。"""
+        """Normalize record timestamps to integers."""
         if isinstance(timestamp, int):
             return timestamp
         return 0
 
-    def _fetch_prefix_shard_specs(self, platform: str) -> list[PackageSpec]:
-        """从 prefix.dev repodata shards 获取某个平台的包规格。"""
+    def _fetch_prefix_shard_specs(  # pylint: disable=too-many-locals
+        self, platform: str
+    ) -> list[PackageSpec]:
+        """Load package specs for a platform from prefix.dev repodata shards."""
         shard_index = self._get_prefix_shard_index(platform)
-        shard_digest = shard_index["shards"].get(self.pkg_name)
+        shard_digest = shard_index["shards"].get(self.args.PKGNAME)
         if shard_digest is None:
             return []
 
@@ -305,7 +311,7 @@ class DownloadPkg:
         shard_payload = self._decode_msgpack_zstd(self._read_url_bytes(shard_url))
         if not isinstance(shard_payload, dict):
             raise RuntimeError(
-                f"Invalid shard payload for {self.pkg_name} on {platform}"
+                f"Invalid shard payload for {self.args.PKGNAME} on {platform}"
             )
 
         base_url = urllib.parse.urljoin(
@@ -330,7 +336,7 @@ class DownloadPkg:
                 isinstance(item, str) for item in [name, version, build, subdir]
             ):
                 continue
-            if name != self.pkg_name:
+            if name != self.args.PKGNAME:
                 continue
 
             md5 = self._normalize_md5(record.get("md5"))
@@ -350,8 +356,9 @@ class DownloadPkg:
                 }
             )
         return pkg_specs
+
     def load_pkg_specs_from_prefix_shards(self) -> list[PackageSpec]:
-        """从 prefix.dev repodata shards 在线加载软件包信息。"""
+        """Load package metadata online from prefix.dev repodata shards."""
         platforms = [self.args.subdir]
         if self.args.subdir != "noarch":
             platforms.append("noarch")
@@ -368,7 +375,7 @@ class DownloadPkg:
         return pkg_specs
 
     def load_pkg_specs(self) -> list[PackageSpec]:
-        """按配置加载软件包信息。"""
+        """Load package metadata according to the configured source."""
         source = (
             "prefix-shards"
             if self.args.spec_source == "prefix-dev"
@@ -384,18 +391,25 @@ class DownloadPkg:
             if pkg_specs:
                 return pkg_specs
             logger.warning(
-                f"{Fore.YELLOW}>> prefix.dev returned no shard records for {self.pkg_name}, "
-                f"falling back to local database.{Style.RESET_ALL}"
+                "%s>> prefix.dev returned no shard records for %s, "
+                "falling back to local database.%s",
+                Fore.YELLOW,
+                self.args.PKGNAME,
+                Style.RESET_ALL,
             )
         except Exception as e:
             logger.warning(
-                f"{Fore.YELLOW}>> Failed to query prefix.dev shards for {self.pkg_name}: "
-                f"{e}. Falling back to local database.{Style.RESET_ALL}"
+                "%s>> Failed to query prefix.dev shards for %s: %s. "
+                "Falling back to local database.%s",
+                Fore.YELLOW,
+                self.args.PKGNAME,
+                e,
+                Style.RESET_ALL,
             )
         return self.load_pkg_specs_from_local_db()
 
     def get_pkg_spec(self) -> PackageSpec:
-        """获取软件包的信息"""
+        """Resolve the package spec to download."""
         py = self.args.py
         ver = self.args.upper_bound
 
@@ -403,15 +417,19 @@ class DownloadPkg:
             pkg_specs = self.load_pkg_specs()
         except FileNotFoundError:
             logger.error(
-                f"{Fore.RED}oo Requested package {self.pkg_name}"
-                + f" is not in database{Style.RESET_ALL}"
+                "%soo Requested package %s is not in database%s",
+                Fore.RED,
+                self.args.PKGNAME,
+                Style.RESET_ALL,
             )
             sys.exit(1)
 
         if not pkg_specs:
             logger.error(
-                f"{Fore.RED}oo Package {self.pkg_name} has no available specs in database"
-                f"{Style.RESET_ALL}"
+                "%soo Package %s has no available specs in database%s",
+                Fore.RED,
+                self.args.PKGNAME,
+                Style.RESET_ALL,
             )
             sys.exit(1)
 
@@ -443,8 +461,11 @@ class DownloadPkg:
             pkg_specs = [p for p in reversed(pkg_specs) if PV(p["version"]) == PV(ver)]
             if len(pkg_specs) == 0:
                 logger.error(
-                    f"{Fore.RED}version {ver} of {self.pkg_name} "
-                    f"is not found in the db{Style.RESET_ALL}"
+                    "%sversion %s of %s is not found in the db%s",
+                    Fore.RED,
+                    ver,
+                    self.args.PKGNAME,
+                    Style.RESET_ALL,
                 )
                 sys.exit(1)
         pkg_specs.sort(key=lambda spec: f"{spec['timestamp']}-{spec['url']}")
@@ -470,23 +491,29 @@ class DownloadPkg:
                 break
         if pkg_spec is None:
             logger.error(
-                f"{Fore.RED}version {ver} of {self.pkg_name} "
-                f"is not found in the db{Style.RESET_ALL}"
+                "%sversion %s of %s is not found in the db%s",
+                Fore.RED,
+                ver,
+                self.args.PKGNAME,
+                Style.RESET_ALL,
             )
             sys.exit(1)
         return pkg_spec
 
     def create_feedstock(self, pkg_spec: PackageSpec) -> None:
-        """创建 feestock"""
+        """Create the feedstock workspace."""
         pkg = pkg_spec["name"]
         logger.info(
-            f"{Fore.GREEN}>> Creating feedstock for "
-            + f"{pkg!r} {pkg_spec['version']}{Style.RESET_ALL}"
+            "%s>> Creating feedstock for %r %s%s",
+            Fore.GREEN,
+            pkg,
+            pkg_spec["version"],
+            Style.RESET_ALL,
         )
         logger.info(
             f">> Downloading binary package {pkg_spec['nv']} from conda-forge channel ..."
         )
-        out_fn = os.path.join(self.workdir, url_basename(pkg_spec["url"]))
+        out_fn = os.path.join(self.args.workdir, url_basename(pkg_spec["url"]))
 
         url_spec = SourceUrlSpec(
             url=pkg_spec["url"],
@@ -494,14 +521,16 @@ class DownloadPkg:
             hash=pkg_spec["md5"],
             fn=url_basename(pkg_spec["url"]),
         )
-        self.download_file((url_spec, pkg, self.workdir))
+        self.download_file((url_spec, pkg, self.args.workdir))
 
         extract_dir = (
             os.path.basename(out_fn).replace(".tar.bz2", "").replace(".conda", "")
         )
 
         # pylint: disable-next=attribute-defined-outside-init
-        self.extract_dir = os.path.normpath(os.path.join(self.workdir, extract_dir))
+        self.extract_dir = os.path.normpath(
+            os.path.join(self.args.workdir, extract_dir)
+        )
 
         self.unpack_conda_pkg(out_fn, self.extract_dir, pkg_spec)
 
@@ -512,7 +541,7 @@ class DownloadPkg:
             zip(
                 url_specs,
                 [pkg] * len(url_specs),
-                [self.pkgs_dir] * len(url_specs),
+                [self.args.pkgs_dir] * len(url_specs),
                 strict=True,
             )
         )
@@ -529,8 +558,11 @@ class DownloadPkg:
             logger.info(f">> Created feedstock for {pkg!r} at {new_recipe}.")
         else:
             logger.info(
-                f"{Fore.GREEN}>> Created feedstock for {pkg!r} "
-                + f"at {new_recipe}.{Style.RESET_ALL}"
+                "%s>> Created feedstock for %r at %s.%s",
+                Fore.GREEN,
+                pkg,
+                new_recipe,
+                Style.RESET_ALL,
             )
         logger.warning(
             f"{Fore.YELLOW}!! Please be sure to check the recipe for necessary modifications."
@@ -549,7 +581,7 @@ class DownloadPkg:
         logger.info("-" * 80)
 
     def download_file(self, para_pairs: DownloadTask) -> None:
-        """下载文件"""
+        """Download a single source file."""
         url_spec, pkg, out_dir = para_pairs
         url = url_spec["url"]
         if url_spec.get("fn") is not None:
@@ -578,33 +610,39 @@ class DownloadPkg:
                 local_hash = hash_files([full_fn], hash_type)
                 if local_hash == file_hash:
                     logger.info(
-                        f"{Fore.YELLOW}oo {fn} exists, skip downloading.{Style.RESET_ALL}"
+                        "%soo %s exists, skip downloading.%s",
+                        Fore.YELLOW,
+                        fn,
+                        Style.RESET_ALL,
                     )
                     return
                 os.unlink(full_fn)
                 self.local_download(dl_urls, full_fn)
             else:
                 logger.info(
-                    f"{Fore.YELLOW}oo {fn} exists, skip downloading because no hash is available.{Style.RESET_ALL}"
+                    "%soo %s exists, skip downloading because no hash is available.%s",
+                    Fore.YELLOW,
+                    fn,
+                    Style.RESET_ALL,
                 )
                 return
         else:
             self.local_download(dl_urls, full_fn)
 
     def local_download(self, dl_urls: list[str], fn: str) -> None:
-        """包装 download"""
+        """Wrap the download flow with retry handling."""
         for url in dl_urls:
             res = self.download(url, fn)
             if isinstance(res, bool) and res is True:
-                logger.info(f"oo File saved to {fn}{Style.RESET_ALL}")
+                logger.info("oo File saved to %s%s", fn, Style.RESET_ALL)
                 return
-            # 重试一次
+            # Retry once.
             logger.warning(
                 f"{Fore.RED}oo Downloading error, retry once.{Style.RESET_ALL}"
             )
             res = self.download(url, fn)
             if isinstance(res, bool) and res is True:
-                logger.info(f"oo File saved to {fn}{Style.RESET_ALL}")
+                logger.info("oo File saved to %s%s", fn, Style.RESET_ALL)
                 return
             if res is False:
                 msg = (
@@ -617,7 +655,7 @@ class DownloadPkg:
 
     @staticmethod
     def download(url: str, fn: str) -> bool | Exception:
-        """下载 url 到 fn"""
+        """Download a URL to the target path."""
         try:
             return asyncio.run(DownloadPkg._download_async(url, fn))
         except aiohttp.ClientResponseError as e:
@@ -629,7 +667,7 @@ class DownloadPkg:
 
     @staticmethod
     async def _download_async(url: str, fn: str) -> bool:
-        """异步下载 url 到 fn。"""
+        """Download a URL to the target path asynchronously."""
         chunk_size = 64 * 1024
         dest = os.path.dirname(fn)
         basefn = os.path.basename(fn)
@@ -638,11 +676,11 @@ class DownloadPkg:
         netloc = url_segs.netloc
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=300)
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            logger.info(f"{Fore.YELLOW}oo Connecting to {netloc}")
+            logger.info("%soo Connecting to %s", Fore.YELLOW, netloc)
             async with session.get(url) as response:
                 response.raise_for_status()
-                logger.info(f"oo Downloading {basefn} from {url}")
-                logger.info(f"oo Downloading {basefn} to {dest}")
+                logger.info("oo Downloading %s from %s", basefn, url)
+                logger.info("oo Downloading %s to %s", basefn, dest)
                 with open(fn, "wb") as out:
                     async for chunk in response.content.iter_chunked(chunk_size):
                         out.write(chunk)
@@ -651,7 +689,7 @@ class DownloadPkg:
     def unpack_conda_pkg(
         self, out_fn: str, extract_dir: str, pkg_spec: PackageSpec
     ) -> None:
-        """解压下载下来的 conda 包"""
+        """Extract the downloaded conda package."""
         logger.info(f">> Unpacking {os.path.basename(out_fn)} to {extract_dir}...")
         shutil.rmtree(extract_dir, ignore_errors=True)
         os.makedirs(extract_dir, exist_ok=True)
@@ -666,20 +704,20 @@ class DownloadPkg:
             extract_archive(out_fn, extract_dir)
 
     def unpack_recipe(self, pkg_spec: PackageSpec) -> RecipePaths:
-        """从下载的 conda 包中解压出 recipe"""
+        """Extract the recipe from the downloaded conda package."""
         old_recipe = os.path.normpath(os.path.join(self.extract_dir, "info", "recipe"))
-        new_recipe = os.path.normpath(os.path.join(self.recipes_dir, pkg_spec["nv"]))
-        os.makedirs(self.recipes_dir, exist_ok=True)
+        new_recipe = os.path.normpath(os.path.join(self.args.recipes_dir, pkg_spec["nv"]))
+        os.makedirs(self.args.recipes_dir, exist_ok=True)
         if os.path.exists(new_recipe):
             shutil.rmtree(new_recipe)
         if os.path.exists(os.path.join(old_recipe, "parent")):
             logger.warning(
-                f"{Fore.RED}!! {self.pkg_name} is a multi-output package, "
+                f"{Fore.RED}!! {self.args.PKGNAME} is a multi-output package, "
                 f"correct its name{Style.RESET_ALL}"
             )
             real_recipe = os.path.join(old_recipe, "parent")
             shutil.copytree(real_recipe, new_recipe)
-            # multi-output: recipe 直接作为模板使用
+            # For multi-output packages, use the recipe directly as the template.
             recipe_file, recipe_tpl = self._find_recipe_file(
                 old_recipe, new_recipe, is_parent=True
             )
@@ -698,14 +736,14 @@ class DownloadPkg:
             self.recipe_format = RecipeFormat.META_YAML
         else:
             self.recipe_format = RecipeFormat.RECIPE_YAML
-        logger.info(f">> Downloading packages to {self.pkgs_dir} ...")
+        logger.info(">> Downloading packages to %s ...", self.args.pkgs_dir)
         return old_recipe, new_recipe, recipe_file, recipe_tpl
 
     @staticmethod
     def _find_recipe_file(
         source_dir: str, dest_dir: str, *, is_parent: bool
     ) -> tuple[str, str]:
-        """在 recipe 目录中查找 recipe.yaml 或 meta.yaml，返回 (recipe_file, recipe_tpl)"""
+        """Find recipe.yaml or meta.yaml and return ``(recipe_file, recipe_tpl)``."""
         recipe_yaml = os.path.join(dest_dir, "recipe.yaml")
         meta_yaml = os.path.join(dest_dir, "meta.yaml")
         if os.path.exists(recipe_yaml):
@@ -720,7 +758,7 @@ class DownloadPkg:
 
     @staticmethod
     def load_urls(recipe_path: str) -> list[SourceUrlSpec]:
-        """从 recipe (meta.yaml 或 recipe.yaml) 中获取可下载的所有 url 地址"""
+        """Load all downloadable URLs from meta.yaml or recipe.yaml."""
         parser = RecipeParser(recipe_path)
         return [
             SourceUrlSpec(
@@ -733,7 +771,7 @@ class DownloadPkg:
         ]
 
     def replace_urls(self, recipe_tpl: str, url_specs: list[SourceUrlSpec]) -> None:
-        """替换 recipe 中 url 地址（支持 meta.yaml 和 recipe.yaml）"""
+        """Replace source URLs in the recipe for both supported formats."""
         parser = RecipeParser(recipe_tpl)
         url_mapping: dict[int, str] = {}
         for idx, url_spec in enumerate(url_specs):
@@ -743,7 +781,7 @@ class DownloadPkg:
                 fn = url_basename(url[0] if isinstance(url, list) else url)
             fn = str(fn)
             fn = f"{self.args.PKGNAME}-{fn}" if fn_is_simple(fn) else fn
-            pkg_path = os.path.join(self.pkgs_dir, fn)
+            pkg_path = os.path.join(self.args.pkgs_dir, fn)
             pkg_path = os.path.relpath(pkg_path, os.path.dirname(recipe_tpl))
             url_mapping[idx] = pkg_path
 
@@ -752,13 +790,13 @@ class DownloadPkg:
 
     @staticmethod
     def extract_reqs(recipe_path: str) -> str:
-        """从 recipe (meta.yaml 或 recipe.yaml) 中找出所依赖的包列表"""
+        """Extract the dependency list from meta.yaml or recipe.yaml."""
         parser = RecipeParser(recipe_path)
         return parser.extract_reqs()
 
 
 def main() -> None:
-    """函数主流程"""
+    """Run the command entry point."""
     setup_logging(120)
     args = parse_args()
     downloader = DownloadPkg(args)

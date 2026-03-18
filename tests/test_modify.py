@@ -1,3 +1,9 @@
+"""Tests for modify."""
+
+# pylint: disable=missing-function-docstring,missing-class-docstring,protected-access
+# pylint: disable=too-few-public-methods,attribute-defined-outside-init
+# pylint: disable=too-many-public-methods,use-implicit-booleaness-not-comparison
+
 import argparse
 import json
 import os
@@ -208,7 +214,9 @@ class TestFileProcessor:
             combined = captured.out + captured.err
             assert "not a ELF file, ignore this file." in combined
 
-    def test_process_files_concurrently_logs_future_errors(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_process_files_concurrently_logs_future_errors(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             src = os.path.join(tmpdir, "x.txt")
             dst = os.path.join(tmpdir, "y.txt")
@@ -875,4 +883,3 @@ class TestMain:
         mocked_setup_logging.assert_called_once_with(120)
         mocked_modify.assert_called_once_with(fake_args)
         mocked_modify.return_value.run.assert_called_once_with()
-

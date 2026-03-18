@@ -1,3 +1,8 @@
+"""Tests for dlpkg."""
+
+# pylint: disable=missing-function-docstring,protected-access
+# pylint: disable=consider-using-from-import,use-implicit-booleaness-not-comparison
+
 import os
 import tempfile
 from argparse import Namespace
@@ -7,7 +12,7 @@ from unittest import mock
 
 import aiohttp
 
-from conda_tool import dlpkg
+import conda_tool.dlpkg as dlpkg
 
 
 def make_args(tmp_path: Path, **overrides: object) -> Namespace:
@@ -34,7 +39,7 @@ def make_args(tmp_path: Path, **overrides: object) -> Namespace:
 def test_downloadpkg_init_uses_plain_error_list(tmp_path: Path) -> None:
     downloader = dlpkg.DownloadPkg(make_args(tmp_path))
 
-    assert downloader.errors == []
+    assert not downloader.errors
     assert isinstance(downloader.errors, list)
 
 

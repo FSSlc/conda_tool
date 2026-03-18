@@ -1,3 +1,7 @@
+"""Tests for extract."""
+
+# pylint: disable=missing-function-docstring,missing-class-docstring
+
 import os
 import sys
 import tarfile

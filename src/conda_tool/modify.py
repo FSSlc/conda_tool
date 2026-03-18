@@ -64,11 +64,11 @@ EXAMPLE_DATA = {
 
 
 def parse_args() -> argparse.Namespace:
-    """解析参数"""
-    # 创建 ArgumentParser 对象
+    """Parse command line arguments."""
+    # Create the argument parser.
     parser = argparse.ArgumentParser(description="conda 包修改工具")
 
-    # 添加参数
+    # Add command line arguments.
     parser.add_argument(
         "-oc", "--output_example_config", action="store_true", help="输出示例配置文件"
     )
@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
         help="是否保留原有 conda 包",
     )
 
-    # 解析参数
+    # Parse arguments.
     args = parser.parse_args()
     if args.output_example_config:
         with open("config.json", "w", encoding="utf-8") as fout:
@@ -188,7 +188,7 @@ class FileProcessor:
 
 
 class Modify:
-    """修改类的具体实现"""
+    """Implement package modification logic."""
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -197,15 +197,15 @@ class Modify:
         self.file_processor = FileProcessor()
 
     def run(self) -> None:
-        """具体实现逻辑"""
+        """Run the main workflow."""
         try:
-            # 1. 检查参数
+            # 1. Validate arguments.
             self.check_args()
-            # 2. 读取配置
+            # 2. Load the configuration.
             logger.info("开始读取配置文件")
             with open(self.config_path, encoding="utf-8") as fin:
                 self.config = json.load(fin)
-            # 3. 获取配置信息并检测配置
+            # 3. Collect package info and validate the rules.
             pkg_infos = self.get_pkg_infos()
             logger.info("读取配置文件完毕")
 
@@ -213,7 +213,7 @@ class Modify:
             filter_pkgs_infos = self.check_config(pkg_infos)
             logger.info("检查配置文件完毕")
 
-            # 4. 修改文件并重新打包
+            # 4. Modify files and repack packages.
             for pkg_info in filter_pkgs_infos:
                 self.handle_one_package(pkg_info)
             logger.info("修改完毕")
@@ -221,11 +221,11 @@ class Modify:
             self.file_processor.shutdown()
 
     def check_args(self) -> None:
-        """检验输入参数"""
-        # 获取参数值
+        """Validate input arguments."""
+        # Resolve argument values.
         logger.info("开始检查传入参数")
         config_path = abs_path(self.args.config_path)
-        # 检查源文件是否存在
+        # Ensure the config file exists.
         if not os.path.isfile(config_path):
             logger.error(f"错误：配置文件 '{config_path}' 不存在")
             logger.info("检查传入参数完毕")
@@ -243,7 +243,7 @@ class Modify:
         logger.info("检查传入参数完毕")
 
     def get_pkg_infos(self) -> list[dict[str, Any]]:
-        """获取包的信息"""
+        """Collect metadata for target packages."""
         if os.path.isfile(self.pkg_path):
             pkg_paths = [self.pkg_path]
         else:
@@ -259,7 +259,7 @@ class Modify:
 
     @staticmethod
     def get_pkg_info(pkg_path: str) -> dict[str, Any]:
-        """获取 conda 包的元信息"""
+        """Extract metadata from a conda package path."""
         dirname = os.path.dirname(pkg_path)
         basename = os.path.basename(pkg_path)
         basename_no_suffix = basename.replace(".tar.bz2", "").replace(".conda", "")
@@ -289,10 +289,10 @@ class Modify:
         }
 
     def check_config(self, pkgs_infos: list[Any]) -> list[Any]:
-        """检查配置信息是否有误"""
+        """Validate the loaded configuration."""
         filter_pkgs_infos, errors = [], defaultdict(list)
         for pkg_name, rule in self.config.items():
-            # 1. pkg_name check
+            # 1. Validate the package name.
             pkg_info = list(filter(lambda x: x.get("name") == pkg_name, pkgs_infos))
             if len(pkg_info) == 0:
                 msg = f"Error, no package named '{pkg_name}' found in '{self.pkg_path}'"
@@ -301,7 +301,7 @@ class Modify:
                 pkg_info = pkg_info[0]
                 self.extract_pkg(pkg_info)
 
-                # 2. rule check and transfer rule paths
+                # 2. Validate rules and expand their paths.
                 for rule_type in ["add", "mv"]:
                     if rule_type in rule:
                         new_expand_rules, errors = self.expand_rule(
@@ -317,7 +317,10 @@ class Modify:
                 pkg_info.update({"rule": rule})
                 filter_pkgs_infos.append(pkg_info)
             else:
-                msg = f"Error, more than one package named '{pkg_name}' found in '{self.pkg_path}', not handle them."
+                msg = (
+                    f"Error, more than one package named '{pkg_name}' found in "
+                    f"'{self.pkg_path}', not handle them."
+                )
                 errors[pkg_name].append(msg)
 
         if len(errors) > 0:
@@ -330,7 +333,7 @@ class Modify:
         return filter_pkgs_infos
 
     def extract_pkg(self, pkg_info: Any) -> None:
-        """解压 conda 包"""
+        """Extract a conda package."""
         pkg_path = pkg_info["path"]
         extract_format = pkg_info["format"]
         extract_path = pkg_info["extract_path"]
@@ -360,7 +363,8 @@ class Modify:
         pkg_name: str,
         pkg_info: dict[str, Any],
     ) -> tuple[dict[str, Any], defaultdict[Any, list[str]]]:
-        """根据 rule_type 获取具体展开规则"""
+        # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+        """Expand concrete rules for the given ``rule_type``."""
         expand_rules = {}
         for k, v in rule[rule_type].items():
             src_path = k
@@ -386,7 +390,7 @@ class Modify:
                     )
                     errors[pkg_name].append(msg)
                 else:
-                    # 如果是目录，则将目录放到目标目录下
+                    # If the source is a directory, place it under the target directory.
                     new_dir = os.path.join(pkg_info["binary_path"], v)
                     file_lists = get_filelist(src_path, with_prefix=True)
                     for file in file_lists:
@@ -396,7 +400,7 @@ class Modify:
                             os.path.relpath(file, start=src_path),
                         )
             else:
-                # 通配符
+                # Wildcard rule.
                 src_path_dirname = os.path.dirname(src_path)
                 if not os.path.exists(src_path_dirname):
                     msg = f"Error, rule {rule_type} '{k}:{v}', {k} is not a valid exist path"
@@ -425,7 +429,7 @@ class Modify:
     def expand_pattern_rule(
         self, rule: dict[str, Any], rule_type: str, pkg_info: dict[str, Any]
     ) -> list[str]:
-        """转换匹配规则，用于 delete strip 规则"""
+        """Expand match rules for delete and strip operations."""
         rules = rule[rule_type]
         spec = pathspec.PathSpec.from_lines(
             pathspec.patterns.gitwildmatch.GitWildMatchPattern, rules
@@ -439,7 +443,7 @@ class Modify:
     def get_spec_match_files(
         basedir: str, spec: pathspec.PathSpec, use_relative: bool = False
     ) -> list[str]:
-        """获取给定匹配规则的文件列表"""
+        """Return files matching the provided rule spec."""
         match_files = []
         for root, _, files in os.walk(basedir):
             for file in files:
@@ -452,7 +456,7 @@ class Modify:
         return match_files
 
     def handle_one_package(self, pkg_info: dict[str, Any]) -> None:
-        """处理一个 conda 包"""
+        """Process a single conda package."""
         logger.info(f"开始处理 {pkg_info['path']}")
         rule = pkg_info["rule"]
         if "add" in rule:
@@ -472,7 +476,7 @@ class Modify:
             self.handle_strip_rule(pkg_info)
             logger.info("  处理 strip 规则完毕")
 
-        # 最后根据 paths.json 内容修改 files, has_prefix 文件
+        # Update files and has_prefix based on paths.json at the end.
         _, paths_json_data = self.get_paths_json_data(pkg_info)
         files_list, has_prefix_list = [], []
         for info in paths_json_data["paths"]:
@@ -490,7 +494,7 @@ class Modify:
         with open(has_prefix_path, "w", encoding="utf-8") as fout:
             fout.write("\n".join(has_prefix_list))
 
-        # 重新打包
+        # Repack the package.
         extract_dir = pkg_info["extract_path"]
         dst_file = pkg_info["path"]
         logger.info(f"  重新打包 {dst_file} 开始")
@@ -509,7 +513,7 @@ class Modify:
         logger.info(f"处理 {pkg_info['path']} 完毕")
 
     def pack_conda(self, dst_file, pkg_info):
-        """重新打包为 .conda 格式的包"""
+        """Repack the package as ``.conda``."""
         with ZipFile(dst_file, "w", compression=ZIP_STORED) as conda_file:
             conda_file.writestr(
                 "metadata.json",
@@ -562,7 +566,7 @@ class Modify:
                             )
 
     def pack_bz2(self, dst_file, pkg_info):
-        """重新打包为 .tar.bz2 格式的包"""
+        """Repack the package as ``.tar.bz2``."""
         prefix = pkg_info["binary_path"]
         with tmp_chdir(prefix):
             files = get_filelist(prefix)
@@ -571,14 +575,14 @@ class Modify:
                     t.add(f, filter=anonymize_tarinfo)
 
     def get_paths_json_data(self, pkg_info: dict[str, Any]) -> tuple[str, Any]:
-        """从 paths.json 获取所有路径信息"""
+        """Load all path metadata from ``paths.json``."""
         paths_json_path = os.path.join(pkg_info["real_info_path"], "paths.json")
         with open(paths_json_path, encoding="utf-8") as fin:
             paths_json_data = json.load(fin)
             return paths_json_path, paths_json_data
 
     def handle_add_rule(self, pkg_info: dict[str, Any]) -> None:
-        """执行复制"""
+        """Apply copy rules."""
         add_rule = pkg_info["rule"]["add"]
         new_data, file_pairs = [], []
 
@@ -619,7 +623,7 @@ class Modify:
                 logger.error(f"Failed to update metadata for {new_file_path}: {str(e)}")
                 continue
 
-        # 修改 paths.json 文件
+        # Update ``paths.json``.
         paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
         paths_json_data["paths"].extend(new_data)
         paths_json_data["paths"].sort(key=lambda x: x.get("_path"))
@@ -627,7 +631,7 @@ class Modify:
             fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
 
     def handle_mv_rule(self, pkg_info: dict[str, Any]) -> None:
-        """执行移动或改名"""
+        """Apply move and rename rules."""
         mv_rule = pkg_info["rule"]["mv"]
         file_pairs = []
         path_updates = []
@@ -664,7 +668,7 @@ class Modify:
             fout.write(json.dumps(paths_json_data, indent=2, ensure_ascii=False))
 
     def handle_delete_rule(self, pkg_info: dict[str, Any]) -> None:
-        """执行删除操作"""
+        """Apply delete rules."""
         delete_rule = pkg_info["rule"]["delete"]
 
         files_to_delete = list(delete_rule)
@@ -690,7 +694,7 @@ class Modify:
             json.dump(paths_json_data, fout, indent=2, ensure_ascii=False)
 
     def handle_strip_rule(self, pkg_info: dict[str, Any]) -> None:
-        """执行压缩操作"""
+        """Apply strip rules."""
         strip_rule = pkg_info["rule"]["strip"]
         paths_json_path, paths_json_data = self.get_paths_json_data(pkg_info)
 
@@ -707,12 +711,12 @@ class Modify:
                 )
             except subprocess.CalledProcessError as e:
                 logger.error(f"Strip failed for {strip_abs_path}: {e.stderr.decode()}")
-            # 修改 paths.json 文件
+            # Update ``paths.json``.
             strip_rel_path = os.path.relpath(strip_abs_path, pkg_info["binary_path"])
             updated = False
             for item in paths_json_data["paths"]:
                 if item.get("_path") == strip_rel_path:
-                    # 大小和 sha256 需要更新
+                    # Refresh size and sha256 after stripping.
                     item.update(
                         {
                             "sha256": hash_files([strip_abs_path], algorithm="sha256"),
@@ -730,7 +734,7 @@ class Modify:
 
 
 def main() -> None:
-    """主逻辑实现"""
+    """Run the command entry point."""
     setup_logging(120)
     args = parse_args()
     instance = Modify(args)
